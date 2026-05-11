@@ -10,6 +10,7 @@
     python live_scanner.py --capital 200    # 调整账户资金
     python live_scanner.py --verbose        # 显示调试日志
     python live_scanner.py --dry-run        # 只拉数据，跳过策略（测试网络）
+    python live_scanner.py --demo-edge      # 模拟 +15% 信息优势（演示用）
 
 依赖
 ----
@@ -54,11 +55,19 @@ class LiveDataSource:
 
     Designed to be passed as the ``data_source`` argument to
     MarketScanner so the rest of the pipeline is unchanged.
+
+    Parameters
+    ----------
+    demo_edge :
+        If True, add +0.15 to every market's true_prob (clamped to 0.999)
+        to simulate a 15% information-edge over the market.
+        USE FOR DEMONSTRATION ONLY — not real alpha.
     """
 
-    def __init__(self, client: GammaClient, limit: int = 200):
-        self._client = client
-        self._limit  = limit
+    def __init__(self, client: GammaClient, limit: int = 200, demo_edge: bool = False):
+        self._client     = client
+        self._limit      = limit
+        self._demo_edge  = demo_edge
 
     def __call__(self) -> List[Market]:
         log = logging.getLogger(__name__)
@@ -73,6 +82,19 @@ class LiveDataSource:
         markets = map_markets(raw)
         log.info("Mapped to %d valid Market objects (%d skipped)",
                  len(markets), len(raw) - len(markets))
+
+        # --demo-edge: shift true_prob by +0.15 on every market
+        # (simulates having a 15% information advantage over the crowd)
+        if self._demo_edge:
+            EDGE = 0.15
+            for m in markets:
+                m.true_prob = min(0.999, m.true_prob + EDGE)
+            log.warning(
+                "[DEMO-EDGE] true_prob boosted by +%.0f%% on all %d markets. "
+                "This is a simulation — NOT real alpha.",
+                EDGE * 100, len(markets),
+            )
+
         return markets
 
 
@@ -112,6 +134,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--dry-run", action="store_true",
         help="Fetch and map markets only — skip strategy/risk (network test)",
+    )
+    p.add_argument(
+        "--demo-edge", action="store_true",
+        help=(
+            "Simulate a 15%% information edge: add +0.15 to every market's "
+            "true_prob before running strategies. DEMO ONLY — not real alpha."
+        ),
     )
     p.add_argument(
         "--verbose", "-v", action="store_true",
@@ -181,7 +210,7 @@ def main() -> None:
     log.info("Gamma API is reachable ✓")
 
     # --- Fetch + map ---
-    data_source = LiveDataSource(client=client, limit=args.limit)
+    data_source = LiveDataSource(client=client, limit=args.limit, demo_edge=args.demo_edge)
 
     if args.dry_run:
         markets = data_source()
@@ -190,8 +219,9 @@ def main() -> None:
 
     # --- Full scan ---
     scanner = MarketScanner(cfg=cfg, data_source=data_source)
-    log.info("Running scanner (capital=$%.0f, max_pos=%.0f%%, min_profit=$%.2f) …",
-             cfg.total_capital, cfg.max_position_ratio * 100, cfg.min_absolute_profit)
+    log.info("Running scanner (capital=$%.0f, max_pos=%.0f%%, min_profit=$%.2f%s) …",
+             cfg.total_capital, cfg.max_position_ratio * 100, cfg.min_absolute_profit,
+             ", DEMO-EDGE +15%" if args.demo_edge else "")
 
     report: ScanReport = scanner.run()
 

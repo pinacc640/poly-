@@ -5,12 +5,15 @@ the controller disposes. It enforces hard numeric rules regardless
 of strategy enthusiasm:
 
     1.  single position  <= 10% of total_capital
-    2.  expected profit  >= $0.50
-    3.  expected profit  >= 1% of total_capital
-    4.  total volatility sleeve <= 20% of total_capital
+    2.  expected profit  >= $0.50  (absolute floor)
+    3.  total volatility sleeve <= 20% of total_capital
 
-Rule 1 is enforced by *downsizing* the position (soft). Rules 2-4
+Rule 1 is enforced by *downsizing* the position (soft). Rules 2-3
 are hard rejections.
+
+NOTE: The 1%-of-capital profit ratio floor (former Rule 3) has been
+removed.  It was redundant with the $0.50 absolute floor for small
+accounts and became over-restrictive as capital grew.
 """
 
 from typing import List, Union
@@ -58,16 +61,7 @@ class RiskController:
             )
             return RiskDecision(approved=False, reasons=reasons)
 
-        # --- Rule 3: profit ratio floor ---
-        min_profit_ratio_usd = cfg.total_capital * cfg.min_profit_ratio
-        if expected_profit < min_profit_ratio_usd:
-            reasons.append(
-                f"expected profit ${expected_profit:.2f} < "
-                f"{cfg.min_profit_ratio:.0%} of capital (${min_profit_ratio_usd:.2f})"
-            )
-            return RiskDecision(approved=False, reasons=reasons)
-
-        # --- Rule 4: volatility sleeve cap ---
+        # --- Rule 3: volatility sleeve cap ---
         if isinstance(opp, VolatilityOpportunity):
             sleeve_cap = cfg.total_capital * cfg.volatility_cap_ratio
             if self._volatility_sleeve_used + position > sleeve_cap:
