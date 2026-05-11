@@ -1,4 +1,4 @@
-"""AI Oracle — DeepSeek-V3 via SiliconFlow for true-probability estimation.
+"""AI Oracle — DeepSeek-V4-Pro via SiliconFlow for true-probability estimation.
 
 Usage
 -----
@@ -33,7 +33,10 @@ log = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 _BASE_URL    = "https://api.siliconflow.cn/v1"
-_MODEL       = "deepseek-ai/DeepSeek-V3"
+_MODEL       = "deepseek-ai/DeepSeek-V4-Pro"  # released 2026-04-24; flagship MoE 1.6T params
+# Fallback options (in order of preference):
+#   "deepseek-ai/DeepSeek-V4-Flash"  — lighter/faster, 284B total params
+#   "deepseek-ai/DeepSeek-V3"        — previous generation
 _ENV_KEY     = "SILICONFLOW_API_KEY"
 _DEFAULT_TIMEOUT = 20          # seconds per API call
 _MAX_TOKENS  = 16              # we only need one number back
@@ -60,7 +63,7 @@ _USER_TEMPLATE = (
 # Oracle class
 # ---------------------------------------------------------------------------
 class AiOracle:
-    """Wraps the SiliconFlow / DeepSeek-V3 API for probability estimation.
+    """Wraps the SiliconFlow / DeepSeek-V4-Pro API for probability estimation.
 
     Parameters
     ----------
