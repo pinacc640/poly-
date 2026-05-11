@@ -14,9 +14,9 @@ from typing import Callable, List, Optional
 
 from .config import AccountConfig, DEFAULT_CONFIG
 from .mock_data import load_mock_markets
-from .models import Market, RiskDecision, StableOpportunity, VolatilityOpportunity
+from .models import Market, RiskDecision, StableOpportunity, VolatilityOpportunity, SmartMoneyOpportunity
 from .risk import RiskController
-from .strategies import stable_strategy, volatility_strategy
+from .strategies import stable_strategy, volatility_strategy, smart_money_strategy
 
 
 # ---------------------------------------------------------------------------
@@ -25,12 +25,14 @@ from .strategies import stable_strategy, volatility_strategy
 @dataclass
 class ScanReport:
     # Approved opportunities (passed risk controller)
-    stable_approved:     List[tuple]  = field(default_factory=list)   # (StableOpportunity, RiskDecision)
-    volatility_approved: List[tuple]  = field(default_factory=list)   # (VolatilityOpportunity, RiskDecision)
+    stable_approved:      List[tuple]  = field(default_factory=list)   # (StableOpportunity, RiskDecision)
+    volatility_approved:  List[tuple]  = field(default_factory=list)   # (VolatilityOpportunity, RiskDecision)
+    smart_money_approved: List[tuple]  = field(default_factory=list)   # (SmartMoneyOpportunity, RiskDecision)
 
     # Rejected for transparency / debugging
-    stable_rejected:     List[tuple]  = field(default_factory=list)
-    volatility_rejected: List[tuple]  = field(default_factory=list)
+    stable_rejected:      List[tuple]  = field(default_factory=list)
+    volatility_rejected:  List[tuple]  = field(default_factory=list)
+    smart_money_rejected: List[tuple]  = field(default_factory=list)
 
     # Metadata
     total_markets_scanned: int = 0
@@ -94,5 +96,14 @@ class MarketScanner:
                 report.volatility_approved.append((opp, decision))
             else:
                 report.volatility_rejected.append((opp, decision))
+
+        # --- Smart Money sleeve (independent sizing, no sleeve cap) ---
+        sm_candidates = smart_money_strategy(markets, self.cfg)
+        for opp in sm_candidates:
+            decision = rc.approve(opp)
+            if decision.approved:
+                report.smart_money_approved.append((opp, decision))
+            else:
+                report.smart_money_rejected.append((opp, decision))
 
         return report

@@ -66,6 +66,33 @@ class VolatilityOpportunity:
     rationale: List[str] = field(default_factory=list)
 
 
+@dataclass
+class SmartMoneyOpportunity:
+    """A market flagged as having anomalous smart-money accumulation.
+
+    Detection signals
+    -----------------
+    - volume_24h exceeds a high threshold (large players are active)
+    - price_change_24h exceeds a directional threshold (one-sided flow)
+    - volume / liquidity ratio is elevated (volume >> resting depth)
+
+    Confidence levels
+    -----------------
+    HIGH   : all three signals present
+    MEDIUM : volume + price move signals present
+    LOW    : only volume spike present
+    """
+    market: Market
+    confidence: Literal["HIGH", "MEDIUM", "LOW"]
+    volume_spike_ratio: float        # volume_24h / avg_daily_volume (>1 = spike)
+    price_move_pct: float            # abs(price_change_24h) as a percentage 0..1
+    flow_direction: Literal["BUY", "SELL"]  # direction smart money appears to be going
+    ev: float                        # EV per $1 if we follow the flow
+    suggested_position: float        # USD
+    expected_profit: float           # USD
+    rationale: List[str] = field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Risk controller result
 # ---------------------------------------------------------------------------

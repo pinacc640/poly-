@@ -4,6 +4,11 @@
 Run:
     python main.py
 
+使用模拟数据运行三大策略：
+  - stable_strategy()      稳健收敛扫描
+  - volatility_strategy()  波动套利扫描
+  - smart_money_strategy() 聪明钱追踪扫描（Alpha 信号）
+
 To override capital or any parameter, edit config.py or pass a custom
 AccountConfig to MarketScanner:
 

@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """live_scanner.py — Polymarket 真实市场扫描器
 
-从 Gamma API 拉取当前活跃市场，经过策略筛选和风控审批后输出交易机会。
+从 Gamma API 拉取当前活跃市场，经过三大策略筛选和风控审批后输出交易机会：
+  - stable_strategy()      稳健收敛（近到期 + 极端价格 + 高流动性）
+  - volatility_strategy()  波动套利（大幅价格移动 fade）
+  - smart_money_strategy() 聪明钱追踪（volume spike + 单边价格偏移）
 
 用法
 ----
