@@ -64,6 +64,22 @@ class AccountConfig:
     # Minimum liquidity (shallow books distort the volume signal)
     sm_min_liquidity: float = 100_000.0
 
+    # --- Arbitrage strategy parameters ---
+    # poly_yes + kalshi_no must be below this to flag as arbitrage
+    # (0.98 = 2% buffer for trading fees and slippage)
+    arb_threshold: float = 0.98
+    # Minimum Jaccard title-similarity to consider two markets the same event
+    arb_min_title_similarity: float = 0.30
+    # Maximum number of Kalshi markets to fetch for matching
+    arb_kalshi_limit: int = 300
+
+    # --- AI Oracle parameters ---
+    # Per-call timeout when querying the AI oracle (seconds)
+    ai_oracle_timeout: float = 20.0
+    # Maximum number of markets to send to the AI oracle in one scan run
+    # (to control API costs; markets are sorted by volume desc before truncation)
+    ai_oracle_max_markets: int = 50
+
 
 # Default singleton. Callers can inject a custom config into MarketScanner.
 DEFAULT_CONFIG = AccountConfig()

@@ -94,6 +94,28 @@ class SmartMoneyOpportunity:
 
 
 # ---------------------------------------------------------------------------
+# Cross-platform arbitrage opportunity
+# ---------------------------------------------------------------------------
+@dataclass
+class ArbitrageOpportunity:
+    """Risk-free arbitrage: buy YES on Polymarket + buy NO on Kalshi.
+
+    Combined cost < 1.00 guarantees a profit regardless of outcome.
+    The threshold is set to 0.98 (2 % buffer for fees / slippage).
+    """
+    poly_market: Market
+    kalshi_ticker: str
+    kalshi_title: str
+    title_similarity: float          # Jaccard score 0..1 of the matched titles
+    poly_yes_price: float            # Polymarket YES ask price
+    kalshi_no_price: float           # Kalshi NO ask price
+    combined_cost: float             # poly_yes_price + kalshi_no_price
+    guaranteed_profit_pct: float     # (1 - combined_cost) per $1 of notional
+    suggested_position: float        # USD
+    expected_profit: float           # USD
+
+
+# ---------------------------------------------------------------------------
 # Risk controller result
 # ---------------------------------------------------------------------------
 @dataclass
