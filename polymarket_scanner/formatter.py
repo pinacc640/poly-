@@ -79,14 +79,16 @@ def format_report(report: ScanReport) -> str:
     # ── Header ──────────────────────────────────────────────────────
     cfg = report.config
     capital_str = f"${cfg.total_capital:.0f}" if cfg else "N/A"
+    total_rej = len(report.stable_rejected) + len(report.volatility_rejected)
     lines += [
         _DIVIDER,
         "  POLYMARKET MARKET SCANNER  —  SCAN REPORT",
         _DIVIDER,
-        f"  Markets scanned : {report.total_markets_scanned}",
-        f"  Account capital : {capital_str}",
-        f"  Stable approved : {len(report.stable_approved)}   "
-        f"Vol approved : {len(report.volatility_approved)}",
+        f"  Markets scanned  : {report.total_markets_scanned}",
+        f"  Account capital  : {capital_str}",
+        f"  Stable approved  : {len(report.stable_approved)}"
+        f"   |  Vol approved  : {len(report.volatility_approved)}"
+        f"   |  Rejected      : {total_rej}",
         _DIVIDER,
         "",
     ]
