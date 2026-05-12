@@ -8,6 +8,7 @@ risk controller.
 
 from .scanner import MarketScanner
 from .models import Market, StableOpportunity, VolatilityOpportunity, RiskDecision
+from .ai_oracle import AIOracle
 
 __all__ = [
     "MarketScanner",
@@ -15,4 +16,5 @@ __all__ = [
     "StableOpportunity",
     "VolatilityOpportunity",
     "RiskDecision",
+    "AIOracle",
 ]

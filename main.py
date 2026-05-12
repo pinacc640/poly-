@@ -1,33 +1,47 @@
 #!/usr/bin/env python3
 """Polymarket Market Scanner — entry point.
 
-Run:
+Run (standard mode, mock data, no AI):
     python main.py
 
-使用模拟数据运行三大策略：
-  - stable_strategy()      稳健收敛扫描
-  - volatility_strategy()  波动套利扫描
-  - smart_money_strategy() 聪明钱追踪扫描（Alpha 信号）
+Run with AI Oracle enrichment (requires DEEPSEEK_API_KEY; BRAVE_API_KEY optional):
+    DEEPSEEK_API_KEY=sk-... BRAVE_API_KEY=BSA... python main.py --ai
 
-To override capital or any parameter, edit config.py or pass a custom
-AccountConfig to MarketScanner:
-
-    from polymarket_scanner.config import AccountConfig
-    from polymarket_scanner.scanner import MarketScanner
-
-    scanner = MarketScanner(cfg=AccountConfig(total_capital=200))
-    report  = scanner.run()
+The --ai flag fetches live Brave Search news for each market and asks
+DeepSeek to re-estimate the true probability before running strategies.
 """
+
+import sys
 
 from polymarket_scanner.scanner import MarketScanner
 from polymarket_scanner.formatter import format_report
 
-
 def main() -> None:
-    scanner = MarketScanner()       # uses DEFAULT_CONFIG + mock data
-    report  = scanner.run()
-    print(format_report(report))
+    use_ai = "--ai" in sys.argv
 
+    if use_ai:
+        import os
+        from polymarket_scanner.ai_oracle import AIOracle
+        from polymarket_scanner.mock_data import load_mock_markets
+
+        print("🔮 AI Oracle mode — enriching markets with DeepSeek + Brave Search…
+")
+
+        try:
+            oracle  = AIOracle()                  # reads DEEPSEEK_API_KEY / BRAVE_API_KEY
+            markets = load_mock_markets()
+            markets = oracle.enrich_all(markets)  # RAG-enriched true_prob values
+        except ValueError as exc:
+            print(f"[ERROR] {exc}")
+            sys.exit(1)
+
+        # Inject enriched markets into the scanner via the data_source hook
+        scanner = MarketScanner(data_source=lambda: markets)
+    else:
+        scanner = MarketScanner()   # DEFAULT_CONFIG + mock data, no AI
+
+    report = scanner.run()
+    print(format_report(report))
 
 if __name__ == "__main__":
     main()

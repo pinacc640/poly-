@@ -1,206 +1,315 @@
-"""AI Oracle — DeepSeek-V3 via SiliconFlow for true-probability estimation.
+"""AI Oracle — DeepSeek + Brave Search RAG probability estimator.
+
+This module enriches Market objects with AI-generated true_prob estimates
+by combining:
+  1. Brave Search API  — fetches top-5 real-time news headlines as context
+  2. DeepSeek Chat API — reasons over the news context to estimate probability
+
+Environment Variables
+---------------------
+DEEPSEEK_API_KEY  (required) : Official DeepSeek API key
+BRAVE_API_KEY     (optional) : Brave Search API key; if absent, falls back to
+                               no-search mode (DeepSeek only, no live context)
 
 Usage
 -----
-    oracle = AiOracle()                   # reads SILICONFLOW_API_KEY from env
-    prob   = oracle.estimate_prob(
-        question="Will the Fed cut rates in June 2026?",
-        current_price=0.35,
-    )
-    # prob is a float in [0.01, 0.99]
+    from polymarket_scanner.ai_oracle import AIOracle
+    from polymarket_scanner.models import Market
 
-Design decisions
-----------------
-- The prompt instructs the model to act as a **financial analyst** and
-  return a *single decimal number* only.  Any prose causes the response
-  parser to fall back to `current_price`.
-- Responses are cached in-process (LRU, 256 slots) so repeated calls for
-  the same question within one scan run never hit the API twice.
-- All network errors are caught and logged; the fallback value is always
-  `current_price` so downstream strategy code never sees None / exception.
-- Timeout is configurable (default 20 s) to keep scan runs snappy.
+    oracle = AIOracle()
+    enriched_market = oracle.enrich(market)   # returns Market with updated true_prob
+    enriched_markets = oracle.enrich_all(markets)
 """
 
+import json
 import logging
 import os
-import re
-from functools import lru_cache
-from typing import Optional
+import time
+from typing import List, Optional
 
-log = logging.getLogger(__name__)
+import urllib.request
+import urllib.parse
+import urllib.error
+
+from .models import Market
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-_BASE_URL    = "https://api.siliconflow.cn/v1"
-_MODEL       = "deepseek-ai/DeepSeek-V3"        # free tier on SiliconFlow (MIT open-source)
-# Upgrade options — require paid SiliconFlow plan (code 30004 if not enabled):
-#   "deepseek-ai/DeepSeek-V4-Flash"  — 284B MoE, faster & cheaper (released 2026-04-24)
-#   "deepseek-ai/DeepSeek-V4-Pro"    — 1.6T MoE flagship         (released 2026-04-24)
-_ENV_KEY     = "SILICONFLOW_API_KEY"
-_DEFAULT_TIMEOUT = 20          # seconds per API call
-_MAX_TOKENS  = 16              # we only need one number back
-
-_SYSTEM_PROMPT = (
-    "You are a professional financial analyst specialising in prediction markets. "
-    "When given a market question and its current traded price, you estimate the "
-    "TRUE probability of the YES outcome based on your knowledge of the underlying "
-    "event. "
-    "Rules:\n"
-    "1. Reply with ONLY a single decimal number between 0.01 and 0.99.\n"
-    "2. Do NOT include any explanation, units, or surrounding text.\n"
-    "3. Examples of valid responses: 0.72  |  0.08  |  0.55\n"
-)
-
-_USER_TEMPLATE = (
-    "Market question: {question}\n"
-    "Current market price (implied probability): {price:.3f}\n"
-    "What is the true probability? Reply with a single decimal number only."
-)
-
+DEEPSEEK_API_URL  = "https://api.deepseek.com/v1/chat/completions"
+DEEPSEEK_MODEL    = "deepseek-chat"
+BRAVE_SEARCH_URL  = "https://api.search.brave.com/res/v1/web/search"
+BRAVE_MAX_RESULTS = 5
+REQUEST_TIMEOUT   = 15   # seconds per HTTP call
+RETRY_ATTEMPTS    = 2
 
 # ---------------------------------------------------------------------------
-# Oracle class
+# Brave Search helper
 # ---------------------------------------------------------------------------
-class AiOracle:
-    """Wraps the SiliconFlow / DeepSeek-V3 API for probability estimation.
+def _brave_search(query: str, api_key: str) -> List[dict]:
+    """Call Brave Web Search API and return top-N result dicts.
+
+    Each returned dict has keys: ``title``, ``description``.
+    Returns an empty list on any error so callers can always fall back.
+    """
+    params = urllib.parse.urlencode({
+        "q": query,
+        "count": BRAVE_MAX_RESULTS,
+        "text_decorations": False,
+        "search_lang": "en",
+    })
+    url = f"{BRAVE_SEARCH_URL}?{params}"
+
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept":               "application/json",
+            "Accept-Encoding":      "gzip",
+            "X-Subscription-Token": api_key,
+        },
+    )
+
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+                raw = resp.read()
+                # urllib may return gzip-compressed bytes
+                try:
+                    import gzip as _gzip
+                    raw = _gzip.decompress(raw)
+                except Exception:
+                    pass
+                data = json.loads(raw.decode("utf-8"))
+
+            results = []
+            for item in data.get("web", {}).get("results", [])[:BRAVE_MAX_RESULTS]:
+                results.append({
+                    "title":       item.get("title", "").strip(),
+                    "description": item.get("description", "").strip(),
+                })
+            return results
+
+        except urllib.error.HTTPError as exc:
+            logger.warning("Brave Search HTTP %s on attempt %d: %s", exc.code, attempt, exc.reason)
+        except urllib.error.URLError as exc:
+            logger.warning("Brave Search URL error on attempt %d: %s", attempt, exc.reason)
+        except Exception as exc:
+            logger.warning("Brave Search unexpected error on attempt %d: %s", attempt, exc)
+
+        if attempt < RETRY_ATTEMPTS:
+            time.sleep(1)
+
+    return []
+
+def _format_news_context(results: List[dict]) -> str:
+    """Render search results as a numbered news-context block."""
+    if not results:
+        return "(No live search results available.)"
+    lines = []
+    for i, r in enumerate(results, 1):
+        title = r.get("title", "N/A")
+        desc  = r.get("description", "")
+        lines.append(f"{i}. {title}")
+        if desc:
+            lines.append(f"   {desc}")
+    return "
+".join(lines)
+
+# ---------------------------------------------------------------------------
+# DeepSeek API helper
+# ---------------------------------------------------------------------------
+def _deepseek_chat(messages: List[dict], api_key: str) -> str:
+    """Send a chat request to DeepSeek and return the assistant content."""
+    payload = json.dumps({
+        "model":       DEEPSEEK_MODEL,
+        "messages":    messages,
+        "temperature": 0.2,
+        "max_tokens":  256,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        DEEPSEEK_API_URL,
+        data=payload,
+        headers={
+            "Content-Type":  "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            return data["choices"][0]["message"]["content"].strip()
+
+        except urllib.error.HTTPError as exc:
+            logger.warning("DeepSeek HTTP %s on attempt %d: %s", exc.code, attempt, exc.reason)
+        except urllib.error.URLError as exc:
+            logger.warning("DeepSeek URL error on attempt %d: %s", attempt, exc.reason)
+        except (KeyError, IndexError, json.JSONDecodeError) as exc:
+            logger.warning("DeepSeek response parse error on attempt %d: %s", attempt, exc)
+        except Exception as exc:
+            logger.warning("DeepSeek unexpected error on attempt %d: %s", attempt, exc)
+
+        if attempt < RETRY_ATTEMPTS:
+            time.sleep(1)
+
+    raise RuntimeError("DeepSeek API call failed after all retry attempts.")
+
+def _parse_probability(text: str) -> Optional[float]:
+    """Extract the first float in [0, 1] from the model's response."""
+    import re
+    for pattern in (
+        r"\b(0\.\d+|\.\d+|1\.0+|0|1)\b",   # bare float/int
+        r"(\d{1,3})%",                        # percentage
+    ):
+        m = re.search(pattern, text)
+        if m:
+            val = float(m.group(1))
+            if "%" in m.group(0):
+                val /= 100.0
+            if 0.0 <= val <= 1.0:
+                return round(val, 4)
+    return None
+
+# ---------------------------------------------------------------------------
+# Prompt builder
+# ---------------------------------------------------------------------------
+def _build_messages(market: Market, news_context: str) -> List[dict]:
+    system_prompt = (
+        "You are a probability calibration expert for prediction markets. "
+        "Your task is to estimate the true probability of a binary market outcome "
+        "resolving YES. Be concise and output ONLY a single number between 0 and 1 "
+        "(e.g. 0.72). Do not include any other text."
+    )
+
+    user_content = f"""Market Question:
+\"{market.question}\"
+
+Current market price (implied probability): {market.price:.2%}
+Category: {market.category}
+Days to expiry: {market.days_to_expiry}
+
+Latest News Context (from Brave Search):
+{news_context}
+
+Based on the news context above, what is your best estimate of the TRUE probability
+that this market resolves YES? Reply with a single decimal number only (e.g. 0.68)."""
+
+    return [
+        {"role": "system",  "content": system_prompt},
+        {"role": "user",    "content": user_content},
+    ]
+
+# ---------------------------------------------------------------------------
+# Main Oracle class
+# ---------------------------------------------------------------------------
+class AIOracle:
+    """Enriches Market objects with AI-estimated true_prob.
 
     Parameters
     ----------
-    api_key :
-        Overrides ``SILICONFLOW_API_KEY`` env var.  Pass explicitly in tests.
-    timeout :
-        Per-request timeout in seconds.
+    deepseek_api_key :
+        DeepSeek API key.  Defaults to env var ``DEEPSEEK_API_KEY``.
+    brave_api_key :
+        Brave Search API key.  Defaults to env var ``BRAVE_API_KEY``.
+        If neither is set, the oracle runs in no-search (fallback) mode.
+    fallback_on_error :
+        When True (default) any API error keeps the original market.true_prob.
+        When False errors are re-raised.
     """
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
-        timeout: float = _DEFAULT_TIMEOUT,
+        deepseek_api_key: Optional[str] = None,
+        brave_api_key:    Optional[str] = None,
+        fallback_on_error: bool = True,
     ):
-        self._api_key = api_key or os.getenv(_ENV_KEY, "")
-        self._timeout = timeout
-        self._client  = None          # lazy-init so import never fails
+        self.deepseek_key      = deepseek_api_key or os.getenv("DEEPSEEK_API_KEY", "")
+        self.brave_key         = brave_api_key    or os.getenv("BRAVE_API_KEY", "")
+        self.fallback_on_error = fallback_on_error
 
-    # ------------------------------------------------------------------
-    # Public helpers
-    # ------------------------------------------------------------------
-    def is_available(self) -> bool:
-        """Return True if an API key is configured."""
-        return bool(self._api_key)
-
-    def estimate_prob(
-        self,
-        question: str,
-        current_price: float,
-    ) -> float:
-        """Return AI-estimated true probability for *question*.
-
-        Falls back to *current_price* on any error so callers are
-        always guaranteed a valid float in [0.01, 0.99].
-        """
-        if not self.is_available():
-            log.warning("[AiOracle] No API key — returning market price as true_prob.")
-            return _clamp(current_price)
-
-        # Use cached helper (keyed on question text + rounded price)
-        return self._cached_estimate(question, round(current_price, 3))
-
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
-    def _get_client(self):
-        """Lazy-init the OpenAI client."""
-        if self._client is None:
-            try:
-                from openai import OpenAI  # type: ignore
-            except ImportError:
-                raise RuntimeError(
-                    "openai package is not installed. "
-                    "Run: pip install openai"
-                )
-            self._client = OpenAI(
-                api_key=self._api_key,
-                base_url=_BASE_URL,
-                timeout=self._timeout,
+        if not self.deepseek_key:
+            raise ValueError(
+                "DeepSeek API key is required. "
+                "Set the DEEPSEEK_API_KEY environment variable."
             )
-        return self._client
 
-    def _cached_estimate(self, question: str, price: float) -> float:
-        """LRU-cached probability estimate keyed on (question, price)."""
-        return _estimate_cached(self._get_client, question, price)
+        self._brave_enabled = bool(self.brave_key)
+        if not self._brave_enabled:
+            logger.info(
+                "BRAVE_API_KEY not set — running in no-search fallback mode "
+                "(DeepSeek only, no live news context)."
+            )
 
-    def batch_estimate(
-        self,
-        markets,            # List[Market]
-        max_workers: int = 5,
-    ) -> None:
-        """Update ``true_prob`` in-place for every market in the list.
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _get_news_context(self, query: str) -> str:
+        """Fetch news via Brave; return formatted context string."""
+        if not self._brave_enabled:
+            return "(Live search disabled — BRAVE_API_KEY not configured.)"
+        results = _brave_search(query, self.brave_key)
+        if not results:
+            logger.warning("Brave Search returned no results for query: %r", query)
+        return _format_news_context(results)
 
-        Uses a simple sequential loop (no threading) to avoid rate-limit
-        bursts.  For large batches consider adding a per-call sleep.
+    def _estimate_prob(self, market: Market, news_context: str) -> float:
+        """Call DeepSeek and parse the probability; raises on failure."""
+        messages = _build_messages(market, news_context)
+        response_text = _deepseek_chat(messages, self.deepseek_key)
+        logger.debug("DeepSeek raw response for %r: %s", market.market_id, response_text)
+
+        prob = _parse_probability(response_text)
+        if prob is None:
+            raise ValueError(
+                f"Could not parse a probability from DeepSeek response: {response_text!r}"
+            )
+        return prob
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def enrich(self, market: Market) -> Market:
+        """Return a copy of `market` with AI-updated true_prob.
+
+        If ``fallback_on_error=True`` and any error occurs, the original
+        market (with its existing true_prob) is returned unchanged.
         """
-        if not self.is_available():
-            log.warning("[AiOracle] No API key — skipping batch estimation.")
-            return
+        try:
+            news_context = self._get_news_context(market.question)
+            new_prob     = self._estimate_prob(market, news_context)
 
-        total = len(markets)
-        for i, market in enumerate(markets, 1):
-            try:
-                prob = self.estimate_prob(market.question, market.price)
-                market.true_prob = prob
-                log.debug(
-                    "[AiOracle] %d/%d  %s  → %.3f  (was %.3f)",
-                    i, total, market.market_id, prob, market.price,
+            logger.info(
+                "[%s] true_prob updated: %.4f → %.4f  (search: %s)",
+                market.market_id,
+                market.true_prob,
+                new_prob,
+                "yes" if self._brave_enabled else "no",
+            )
+
+            import dataclasses
+            return dataclasses.replace(market, true_prob=new_prob)
+
+        except Exception as exc:
+            if self.fallback_on_error:
+                logger.warning(
+                    "[%s] AIOracle failed (%s), keeping original true_prob=%.4f",
+                    market.market_id, exc, market.true_prob,
                 )
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "[AiOracle] %d/%d  %s  failed: %s — keeping price as true_prob",
-                    i, total, market.market_id, exc,
-                )
+                return market
+            raise
 
+    def enrich_all(self, markets: List[Market]) -> List[Market]:
+        """Enrich an entire list of markets, returning enriched copies.
 
-# ---------------------------------------------------------------------------
-# Module-level LRU cache (survives multiple AiOracle instances in one run)
-# ---------------------------------------------------------------------------
-@lru_cache(maxsize=256)
-def _estimate_cached(get_client_fn, question: str, price: float) -> float:
-    """Cached inner call.  get_client_fn is hashable (bound method)."""
-    client = get_client_fn()
-    user_msg = _USER_TEMPLATE.format(question=question, price=price)
-    try:
-        response = client.chat.completions.create(
-            model=_MODEL,
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user",   "content": user_msg},
-            ],
-            max_tokens=_MAX_TOKENS,
-            temperature=0.0,        # deterministic output
-        )
-        raw = response.choices[0].message.content.strip()
-        return _parse_prob(raw, fallback=price)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("[AiOracle] API call failed: %s — using market price %.3f", exc, price)
-        return _clamp(price)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-def _parse_prob(text: str, fallback: float) -> float:
-    """Extract the first valid float from *text* and clamp to [0.01, 0.99]."""
-    # Match a decimal number, e.g. "0.72" or ".72" or "72" (treated as 0.72)
-    match = re.search(r"\b(0?\.\d+|\d+\.\d*|\d+)\b", text)
-    if not match:
-        log.warning("[AiOracle] Could not parse response %r — using fallback %.3f", text, fallback)
-        return _clamp(fallback)
-    value = float(match.group(1))
-    # If model returned e.g. "72" treat it as 0.72
-    if value > 1.0:
-        value = value / 100.0
-    return _clamp(value)
-
-
-def _clamp(v: float) -> float:
-    return max(0.01, min(0.99, float(v)))
+        Markets that fail enrichment are returned with their original
+        true_prob (when fallback_on_error=True).
+        """
+        enriched = []
+        for m in markets:
+            enriched.append(self.enrich(m))
+        return enriched
