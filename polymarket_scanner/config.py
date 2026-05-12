@@ -59,6 +59,11 @@ class AccountConfig:
     vol_stop_move: float = 0.05              # -5% stop loss
     vol_max_hold_days: int = 3
 
+    # --- Take Profit (Phase 3) ---
+    # TP = entry + (true_prob - entry) * tp_capture_ratio
+    # 0.80 = capture 80% of the AI edge gap; avoids waiting for settlement.
+    tp_capture_ratio: float = 0.80
+
     # --- Smart Money strategy filters ---
     sm_min_volume_24h: float = 100_000.0
     sm_min_price_move: float = 0.15
@@ -67,6 +72,13 @@ class AccountConfig:
     sm_medium_confidence_edge: float = 0.05
     sm_max_days_to_expiry: int = 30
     sm_min_liquidity: float = 100_000.0
+
+    # --- Smart Money 2.0: price-impact whale filter (Phase 3) ---
+    # price_impact_ratio = abs(price_change_24h) / (volume_24h / liquidity)
+    # High volume + no price movement = wash trading → reject.
+    sm_min_price_impact_ratio: float = 0.10
+    # Breakout: abs(price_change_24h) must exceed this for HIGH confidence.
+    sm_breakout_threshold: float = 0.10
 
     # --- Arbitrage strategy parameters ---
     arb_threshold: float = 0.98

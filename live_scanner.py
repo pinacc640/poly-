@@ -263,6 +263,24 @@ def main() -> None:
     )
     if total_approved == 0:
         log.info("No approved opportunities found this scan.")
+
+    # ── Telegram push (Phase 3) ──────────────────────────────────────────────
+    # Reads TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID from environment.
+    # Silently skips if either variable is not set.
+    from polymarket_scanner.notifier import TelegramNotifier
+    notifier = TelegramNotifier()
+    if notifier.is_enabled():
+        tradeable = (
+            len(report.stable_approved)
+            + len(report.volatility_approved)
+            + len(report.smart_money_approved)
+        )
+        if tradeable > 0:
+            sent = notifier.send_report(report)
+            log.info("📱 Telegram: sent %d message(s)", sent)
+        else:
+            log.info("📱 Telegram: no trade opportunities, skipping push")
+
     sys.exit(0)
 
 
