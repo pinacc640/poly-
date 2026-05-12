@@ -87,21 +87,82 @@ def _gamma_fetch_raw(limit: int, timeout: int) -> List[dict]:
         raise RuntimeError(f"Gamma API 未知错误: {e}") from e
 
 
+def _is_market_active(raw: dict) -> bool:
+    """Bug fix #1: reject dead / resolved / non-active markets.
+
+    Checks four fields from the Gamma API response:
+      - active        : must be True
+      - closed        : must be False
+      - archived      : must be False
+      - acceptingOrders: should be True (prevents trading on halted markets)
+
+    A missing field is treated conservatively (assume bad = skip).
+    """
+    if raw.get("active") is not True:
+        return False
+    if raw.get("closed") is True:
+        return False
+    if raw.get("archived") is True:
+        return False
+    if raw.get("acceptingOrders") is False:
+        return False
+    return True
+
+
+def _extract_event_slug(raw: dict) -> str:
+    """Bug fix #2: extract the event-level slug for correct URL generation.
+
+    The Gamma API embeds event metadata under raw["events"][0]["slug"].
+    This slug maps directly to https://polymarket.com/event/{slug}.
+    Falls back to the market-level 'slug', then empty string.
+
+    Example API response (confirmed from live API):
+      raw["events"][0]["slug"] → "what-will-happen-before-gta-vi"
+      raw["slug"]              → "new-rhianna-album-before-gta-vi-926"
+
+    The event slug is the correct one to use in the URL.
+    """
+    events = raw.get("events") or []
+    if isinstance(events, list) and events:
+        event_slug = (events[0] or {}).get("slug", "")
+        if event_slug:
+            return str(event_slug)
+    # Fallback: market-level slug (less reliable for URL routing)
+    return str(raw.get("slug") or "")
+
+
 def _parse_gamma_market(raw: dict) -> Optional[Market]:
     """把 Gamma API 的单条 market dict 转成内部 Market 对象，解析失败返回 None。"""
     try:
+        # ── Bug fix #1: skip dead / resolved / non-active markets ─────────
+        if not _is_market_active(raw):
+            return None
+
         market_id = str(raw.get("id") or raw.get("conditionId") or "").strip()
         question  = str(raw.get("question") or raw.get("title") or "").strip()
         if not market_id or not question:
             return None
 
         # 价格
-        outcomes = raw.get("outcomePrices") or []
-        if isinstance(outcomes, list) and len(outcomes) >= 1:
-            price = float(outcomes[0])
+        # outcomePrices from Gamma API is a JSON-encoded string, e.g. '["0.575","0.425"]'
+        # We must decode it before indexing.
+        outcomes_raw = raw.get("outcomePrices") or []
+        if isinstance(outcomes_raw, str):
+            try:
+                outcomes_raw = json.loads(outcomes_raw)
+            except (json.JSONDecodeError, ValueError):
+                outcomes_raw = []
+        if isinstance(outcomes_raw, list) and len(outcomes_raw) >= 1:
+            price = float(outcomes_raw[0])
         else:
             price = float(raw.get("lastTradePrice") or 0.5)
         price = max(0.0, min(1.0, price))
+
+        # ── Bug fix #1 (continued): extreme-price filter ──────────────────
+        # Prices ≤ 0.02 or ≥ 0.98 are effectively already resolved.
+        # Trading on them risks entering a dead/near-resolved market.
+        if price <= 0.02 or price >= 0.98:
+            return None
 
         # 流动性 / 成交量
         liquidity        = float(raw.get("liquidity")     or 0)
@@ -131,6 +192,9 @@ def _parse_gamma_market(raw: dict) -> Optional[Market]:
         else:
             category = str(raw.get("category") or "general").lower()
 
+        # ── Bug fix #2: extract event slug for correct Polymarket URL ─────
+        event_slug = _extract_event_slug(raw)
+
         return Market(
             market_id        = market_id,
             question         = question,
@@ -142,6 +206,7 @@ def _parse_gamma_market(raw: dict) -> Optional[Market]:
             price_change_24h = price_change_24h,
             days_to_expiry   = days_to_expiry,
             true_prob        = price,   # AI Oracle 后续覆盖
+            event_slug       = event_slug,
         )
     except Exception:
         return None

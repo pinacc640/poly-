@@ -26,6 +26,9 @@ class Market:
     true_prob: float                 # analyst / model estimate of fair prob
     has_political_shock: bool = False         # sudden headline risk
     has_fundamental_change: bool = False      # disqualifies vol arbitrage
+    # Bug fix #2: store the event slug from events[0].slug for correct URL generation.
+    # Falls back to the market-level slug, then to market_id if neither is available.
+    event_slug: str = ""
 
     @property
     def volume_increasing(self) -> bool:
@@ -37,6 +40,16 @@ class Market:
         # Matching is done against the config blocklist in the strategy,
         # but this convenience property is handy for tests/debugging.
         return self.category.lower() in {"oil", "gold", "war", "geopolitics"}
+
+    def polymarket_url(self) -> str:
+        """Return the canonical Polymarket event URL.
+
+        Uses the event-level slug (events[0].slug from the API) which maps
+        to https://polymarket.com/event/{slug}. Falls back gracefully if
+        no slug was stored.
+        """
+        slug = self.event_slug or self.market_id
+        return f"https://polymarket.com/event/{slug}"
 
 
 # ---------------------------------------------------------------------------
