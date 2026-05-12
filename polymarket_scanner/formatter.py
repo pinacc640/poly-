@@ -7,11 +7,17 @@ all four output sections:
   3. Smart Money Opportunities
   4. Arbitrage Opportunities (Risk-Free)
 
+Each approved opportunity now shows:
+  - Kelly f (raw fraction) and Quarter-Kelly USD position
+  - Suggested Limit Price with MAKER/TAKER execution advice
+  - Bid/Ask spread
+
 Rejected candidates are shown in a compact audit trail at the bottom.
 """
 
 from .models import (
     ArbitrageOpportunity,
+    OrderBookAdvice,
     RiskDecision,
     SmartMoneyOpportunity,
     StableOpportunity,
@@ -20,26 +26,64 @@ from .models import (
 from .scanner import ScanReport
 
 _NO_TRADE_MSG = "当前无符合纪律的交易机会。"
-_DIVIDER = "─" * 60
+_DIVIDER      = "─" * 70
+_THIN_DIV     = "·" * 70
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+def _fmt_kelly_block(kelly_f: float, kelly_pos: float, approved_pos: float) -> str:
+    """Format the Kelly sizing block shown in every opportunity."""
+    pct    = kelly_f * 100
+    capped = approved_pos < kelly_pos - 0.005   # capped if >half-cent diff
+    cap_note = f"  ⚠ capped to ${approved_pos:.2f}" if capped else ""
+    return (
+        f"    Kelly f (raw):      {pct:+.2f}%  →  "
+        f"¼-Kelly = ${kelly_pos:.2f}{cap_note}\n"
+        f"    ✅ Suggested Bet:   ${approved_pos:.2f}"
+    )
+
+
+def _fmt_order_block(advice: OrderBookAdvice) -> str:
+    """Format the order-book execution advice block."""
+    if advice is None:
+        return "    Order Advice:      N/A"
+
+    tag        = "🟢 TAKER" if advice.order_type == "TAKER" else "🟡 MAKER"
+    spread_str = f"{advice.spread:.4f}" if advice.spread > 0 else "n/a"
+    return (
+        f"    Spread (Bid-Ask):   {spread_str}\n"
+        f"    Exec Type:         {tag}\n"
+        f"    Limit Price:       {advice.limit_price:.4f}  (side={advice.side})\n"
+        f"    Exec Rationale:    {advice.rationale}"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Per-opportunity formatters
 # ---------------------------------------------------------------------------
+
 def _fmt_stable(opp: StableOpportunity, decision: RiskDecision) -> str:
     pos    = decision.approved_position or opp.suggested_position
     scale  = pos / opp.suggested_position if opp.suggested_position else 1
     profit = opp.expected_profit * scale
     notes  = " | ".join(opp.rationale)
+
+    kelly_block = _fmt_kelly_block(decision.kelly_f, decision.kelly_position, pos)
+    order_block = _fmt_order_block(opp.order_advice)
+
     return (
         f"  - Market:            {opp.market.question}\n"
         f"    ID:                {opp.market.market_id}  |  Category: {opp.market.category}\n"
-        f"    Score:             {opp.score}\n"
+        f"    Score:             {opp.score}  |  Risk: {opp.risk_level}\n"
         f"    EV (per $1):       {opp.ev:+.4f}\n"
-        f"    Suggested Position: ${pos:.2f}\n"
         f"    Expected Profit:   ${profit:.2f}\n"
-        f"    Risk Level:        {opp.risk_level}\n"
-        f"    Rationale:         {notes}"
+        f"    Rationale:         {notes}\n"
+        f"{_THIN_DIV}\n"
+        f"{kelly_block}\n"
+        f"{order_block}"
     )
 
 
@@ -48,19 +92,22 @@ def _fmt_volatility(opp: VolatilityOpportunity, decision: RiskDecision) -> str:
     scale  = pos / opp.suggested_position if opp.suggested_position else 1
     profit = opp.expected_profit * scale
     notes  = " | ".join(opp.rationale)
+
+    kelly_block = _fmt_kelly_block(decision.kelly_f, decision.kelly_position, pos)
+    order_block = _fmt_order_block(opp.order_advice)
+
     return (
         f"  - Market:            {opp.market.question}\n"
         f"    ID:                {opp.market.market_id}  |  Category: {opp.market.category}\n"
-        f"    Entry:             {opp.entry_price:.3f}\n"
-        f"    Target:            {opp.target_price:.3f}  "
-        f"(+{opp.target_price - opp.entry_price:+.3f})\n"
-        f"    Stop Loss:         {opp.stop_loss:.3f}  "
-        f"({opp.stop_loss - opp.entry_price:+.3f})\n"
+        f"    Entry:             {opp.entry_price:.4f}  →  "
+        f"Target: {opp.target_price:.4f}  |  Stop: {opp.stop_loss:.4f}\n"
         f"    Max Hold:          {opp.max_hold_days} days\n"
         f"    EV (per $1):       {opp.ev:+.4f}\n"
-        f"    Suggested Position: ${pos:.2f}\n"
         f"    Expected Profit:   ${profit:.2f}\n"
-        f"    Rationale:         {notes}"
+        f"    Rationale:         {notes}\n"
+        f"{_THIN_DIV}\n"
+        f"{kelly_block}\n"
+        f"{order_block}"
     )
 
 
@@ -72,17 +119,23 @@ def _fmt_smart_money(opp: SmartMoneyOpportunity, decision: RiskDecision) -> str:
     badge  = {"HIGH": "🔴 HIGH", "MEDIUM": "🟡 MEDIUM", "LOW": "⚪ LOW"}.get(
         opp.confidence, opp.confidence
     )
+
+    kelly_block = _fmt_kelly_block(decision.kelly_f, decision.kelly_position, pos)
+    order_block = _fmt_order_block(opp.order_advice)
+
     return (
         f"  - Market:            {opp.market.question}\n"
         f"    ID:                {opp.market.market_id}  |  Category: {opp.market.category}\n"
         f"    Confidence:        {badge}\n"
-        f"    Flow Direction:    {opp.flow_direction}"
-        f"  |  Vol/Liq Ratio: {opp.volume_spike_ratio:.2f}\n"
-        f"    Price Move 24h:    {opp.price_move_pct:+.1%}\n"
+        f"    Flow:              {opp.flow_direction}  "
+        f"|  Vol/Liq={opp.volume_spike_ratio:.2f}  "
+        f"|  Price Move={opp.price_move_pct:+.1%}\n"
         f"    EV (per $1):       {opp.ev:+.4f}\n"
-        f"    Suggested Position: ${pos:.2f}\n"
         f"    Expected Profit:   ${profit:.2f}\n"
-        f"    Signals:           {notes}"
+        f"    Signals:           {notes}\n"
+        f"{_THIN_DIV}\n"
+        f"{kelly_block}\n"
+        f"{order_block}"
     )
 
 
@@ -92,9 +145,9 @@ def _fmt_arbitrage(opp: ArbitrageOpportunity) -> str:
         f"  - Polymarket:        {opp.poly_market.question}\n"
         f"    Kalshi match:      {opp.kalshi_title}\n"
         f"    Kalshi ticker:     {opp.kalshi_ticker}"
-        f"  |  Title similarity: {opp.title_similarity:.0%}\n"
+        f"  |  Similarity: {opp.title_similarity:.0%}\n"
         f"    Poly YES price:    {opp.poly_yes_price:.4f}"
-        f"  |  Kalshi NO ask: {opp.kalshi_no_price:.4f}\n"
+        f"  |  Kalshi NO: {opp.kalshi_no_price:.4f}\n"
         f"    Combined cost:     {opp.combined_cost:.4f}"
         f"  →  Guaranteed edge: {profit_pct:.2f}%\n"
         f"    Suggested Position: ${opp.suggested_position:.2f}\n"
@@ -103,9 +156,25 @@ def _fmt_arbitrage(opp: ArbitrageOpportunity) -> str:
 
 
 def _fmt_rejected(opp, decision: RiskDecision) -> str:
-    name    = opp.market.question[:55] + ("…" if len(opp.market.question) > 55 else "")
-    reasons = "; ".join(decision.reasons)
-    return f"    [{opp.market.market_id}] {name}\n      ↳ REJECTED: {reasons}"
+    name       = opp.market.question[:55] + ("…" if len(opp.market.question) > 55 else "")
+    reasons    = "; ".join(decision.reasons)
+    kelly_note = (
+        f" [Kelly f={decision.kelly_f:+.4f}]" if decision.kelly_f != 0.0 else ""
+    )
+    return f"    [{opp.market.market_id}] {name}\n      ↳ REJECTED{kelly_note}: {reasons}"
+
+
+# ---------------------------------------------------------------------------
+# Kelly legend (shown once in the header)
+# ---------------------------------------------------------------------------
+def _kelly_legend(cfg) -> str:
+    if cfg is None:
+        return ""
+    return (
+        f"  Kelly settings:  fraction=¼ ({cfg.kelly_fraction:.2f})"
+        f"  |  cap={cfg.max_kelly_position_ratio:.0%} of capital"
+        f"  |  Maker threshold={cfg.taker_spread_threshold:.2f}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +191,7 @@ def format_report(report: ScanReport) -> str:
         + len(report.smart_money_rejected)
     )
     ai_tag  = "  [AI✓]" if report.ai_oracle_used else ""
-    arb_tag = f"  |  Arbitrage: {len(report.arbitrage_found)}" if report.run_arbitrage else ""
+    arb_tag = f"  |  Arb: {len(report.arbitrage_found)}" if report.run_arbitrage else ""
 
     # ── Header ──────────────────────────────────────────────────────
     lines += [
@@ -135,6 +204,7 @@ def format_report(report: ScanReport) -> str:
         lines.append(f"  Kalshi markets   : {report.kalshi_markets_scanned}")
     lines += [
         f"  Account capital  : {capital_str}",
+        _kelly_legend(cfg),
         f"  Stable approved  : {len(report.stable_approved)}"
         f"   |  Vol: {len(report.volatility_approved)}"
         f"   |  Smart$: {len(report.smart_money_approved)}"
