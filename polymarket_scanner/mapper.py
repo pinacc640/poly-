@@ -152,6 +152,36 @@ def _parse_yes_price(raw: Dict[str, Any]) -> float:
         return _safe_float(raw.get("lastTradePrice"), 0.5)
 
 
+def _parse_bid_ask(raw: Dict[str, Any], yes_price: float) -> tuple:
+    """Extract best bid and best ask from Gamma API response.
+
+    Gamma API field candidates:
+      - bestBid / bestAsk  (some endpoints)
+      - bestBidPrice / bestAskPrice
+      - spread (if available, used to synthesise bid/ask around mid)
+
+    If explicit bid/ask fields are absent, we synthesise a conservative
+    estimate:  bid = price - half_tick,  ask = price + half_tick,
+    where half_tick = 0.01 (the minimum Polymarket tick size).
+    """
+    # Try explicit fields first
+    bid = _safe_float(raw.get("bestBid") or raw.get("bestBidPrice"), 0.0)
+    ask = _safe_float(raw.get("bestAsk") or raw.get("bestAskPrice"), 0.0)
+
+    if bid > 0 and ask > 0 and ask > bid:
+        return round(bid, 4), round(ask, 4)
+
+    # Synthesise from spread field if available
+    spread = _safe_float(raw.get("spread"), 0.0)
+    if spread > 0:
+        half = spread / 2.0
+        return round(yes_price - half, 4), round(yes_price + half, 4)
+
+    # Last resort: use ±1 tick around the mid-price
+    tick = 0.01
+    return round(max(0.01, yes_price - tick), 4), round(min(0.99, yes_price + tick), 4)
+
+
 def _days_to_expiry(raw: Dict[str, Any]) -> int:
     """Compute calendar days from now to endDate (floor, minimum 0)."""
     end_str: Optional[str] = raw.get("endDate") or raw.get("endDateIso")
@@ -223,6 +253,8 @@ def map_to_market(raw: Dict[str, Any]) -> Optional[Market]:
     price_change    = _safe_float(raw.get("oneDayPriceChange"), 0.0)
     days            = _days_to_expiry(raw)
 
+    best_bid, best_ask = _parse_bid_ask(raw, price)
+
     return Market(
         market_id=market_id,
         question=question,
@@ -236,6 +268,8 @@ def map_to_market(raw: Dict[str, Any]) -> Optional[Market]:
         true_prob=true_prob,
         has_political_shock=False,       # no live signal; override manually if needed
         has_fundamental_change=False,    # no live signal; override manually if needed
+        best_bid=best_bid,
+        best_ask=best_ask,
     )
 
 
