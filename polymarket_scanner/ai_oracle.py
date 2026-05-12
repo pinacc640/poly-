@@ -49,7 +49,12 @@ RETRY_ATTEMPTS    = 2
 # ---------------------------------------------------------------------------
 # Brave Search helper
 # ---------------------------------------------------------------------------
-def _brave_search(query: str, api_key: str) -> List[dict]:
+def _brave_search(
+    query: str,
+    api_key: str,
+    max_results: int = BRAVE_MAX_RESULTS,
+    timeout: int = REQUEST_TIMEOUT,
+) -> List[dict]:
     """Call Brave Web Search API and return top-N result dicts.
 
     Each returned dict has keys: ``title``, ``description``.
@@ -57,7 +62,7 @@ def _brave_search(query: str, api_key: str) -> List[dict]:
     """
     params = urllib.parse.urlencode({
         "q": query,
-        "count": BRAVE_MAX_RESULTS,
+        "count": max_results,
         "text_decorations": False,
         "search_lang": "en",
     })
@@ -74,7 +79,7 @@ def _brave_search(query: str, api_key: str) -> List[dict]:
 
     for attempt in range(1, RETRY_ATTEMPTS + 1):
         try:
-            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read()
                 # urllib may return gzip-compressed bytes
                 try:
@@ -85,7 +90,7 @@ def _brave_search(query: str, api_key: str) -> List[dict]:
                 data = json.loads(raw.decode("utf-8"))
 
             results = []
-            for item in data.get("web", {}).get("results", [])[:BRAVE_MAX_RESULTS]:
+            for item in data.get("web", {}).get("results", [])[:max_results]:
                 results.append({
                     "title":       item.get("title", "").strip(),
                     "description": item.get("description", "").strip(),
@@ -122,13 +127,20 @@ def _format_news_context(results: List[dict]) -> str:
 # ---------------------------------------------------------------------------
 # DeepSeek API helper
 # ---------------------------------------------------------------------------
-def _deepseek_chat(messages: List[dict], api_key: str) -> str:
+def _deepseek_chat(
+    messages: List[dict],
+    api_key: str,
+    model: str = DEEPSEEK_MODEL,
+    temperature: float = 0.2,
+    max_tokens: int = 256,
+    timeout: int = REQUEST_TIMEOUT,
+) -> str:
     """Send a chat request to DeepSeek and return the assistant content."""
     payload = json.dumps({
-        "model":       DEEPSEEK_MODEL,
+        "model":       model,
         "messages":    messages,
-        "temperature": 0.2,       # low temperature for calibrated probability
-        "max_tokens":  256,
+        "temperature": temperature,
+        "max_tokens":  max_tokens,
     }).encode("utf-8")
 
     req = urllib.request.Request(
@@ -143,7 +155,7 @@ def _deepseek_chat(messages: List[dict], api_key: str) -> str:
 
     for attempt in range(1, RETRY_ATTEMPTS + 1):
         try:
-            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             return data["choices"][0]["message"]["content"].strip()
 
@@ -226,17 +238,40 @@ class AIOracle:
     fallback_on_error :
         When True (default) any API error keeps the original market.true_prob.
         When False errors are re-raised.
+    timeout :
+        HTTP request timeout in seconds (default: REQUEST_TIMEOUT = 15).
+        Overrides the module-level constant for both Brave and DeepSeek calls.
+    model :
+        DeepSeek model name to use (default: ``deepseek-chat``).
+    max_results :
+        Maximum number of Brave Search results to fetch (default: 5).
+    temperature :
+        Sampling temperature for DeepSeek (default: 0.2).
+    max_tokens :
+        Maximum tokens in the DeepSeek response (default: 256).
     """
 
     def __init__(
         self,
-        deepseek_api_key: Optional[str] = None,
-        brave_api_key:    Optional[str] = None,
+        deepseek_api_key:  Optional[str] = None,
+        brave_api_key:     Optional[str] = None,
         fallback_on_error: bool = True,
+        timeout:           Optional[int] = None,
+        model:             Optional[str] = None,
+        max_results:       Optional[int] = None,
+        temperature:       Optional[float] = None,
+        max_tokens:        Optional[int] = None,
     ):
-        self.deepseek_key     = deepseek_api_key or os.getenv("DEEPSEEK_API_KEY", "")
-        self.brave_key        = brave_api_key    or os.getenv("BRAVE_API_KEY", "")
+        self.deepseek_key      = deepseek_api_key or os.getenv("DEEPSEEK_API_KEY", "")
+        self.brave_key         = brave_api_key    or os.getenv("BRAVE_API_KEY", "")
         self.fallback_on_error = fallback_on_error
+
+        # Tuneable overrides (fall back to module-level defaults when None)
+        self._timeout     = timeout     if timeout     is not None else REQUEST_TIMEOUT
+        self._model       = model       if model       is not None else DEEPSEEK_MODEL
+        self._max_results = max_results if max_results is not None else BRAVE_MAX_RESULTS
+        self._temperature = temperature if temperature is not None else 0.2
+        self._max_tokens  = max_tokens  if max_tokens  is not None else 256
 
         if not self.deepseek_key:
             raise ValueError(
@@ -258,7 +293,11 @@ class AIOracle:
         """Fetch news via Brave; return formatted context string."""
         if not self._brave_enabled:
             return "(Live search disabled — BRAVE_API_KEY not configured.)"
-        results = _brave_search(query, self.brave_key)
+        results = _brave_search(
+            query, self.brave_key,
+            max_results=self._max_results,
+            timeout=self._timeout,
+        )
         if not results:
             logger.warning("Brave Search returned no results for query: %r", query)
         return _format_news_context(results)
@@ -266,7 +305,13 @@ class AIOracle:
     def _estimate_prob(self, market: Market, news_context: str) -> float:
         """Call DeepSeek and parse the probability; raises on failure."""
         messages = _build_messages(market, news_context)
-        response_text = _deepseek_chat(messages, self.deepseek_key)
+        response_text = _deepseek_chat(
+            messages, self.deepseek_key,
+            model=self._model,
+            temperature=self._temperature,
+            max_tokens=self._max_tokens,
+            timeout=self._timeout,
+        )
         logger.debug("DeepSeek raw response for %r: %s", market.market_id, response_text)
 
         prob = _parse_probability(response_text)
