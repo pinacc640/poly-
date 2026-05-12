@@ -124,18 +124,49 @@ class MarketScanner:
         # ── Optional: AI Oracle probability enrichment ─────────────
         if self.use_ai:
             from .ai_oracle import AIOracle
+            import logging as _logging
+            _log = _logging.getLogger(__name__)
+
             oracle = AIOracle(timeout=self.cfg.ai_oracle_timeout)
-            if oracle.is_available():
-                # Limit API calls: enrich only top-N markets by volume
-                top = sorted(markets, key=lambda m: m.volume_24h, reverse=True)
-                top = top[: self.cfg.ai_oracle_max_markets]
-                oracle.batch_estimate(top)
-                report.ai_oracle_used = True
-            else:
-                import logging
-                logging.getLogger(__name__).warning(
-                    "[AI Oracle] SILICONFLOW_API_KEY not set — skipping."
-                )
+
+            # ── AI 前置过滤：只对高价值/高波动市场调用 AI（省钱护城河）──
+            AI_MIN_LIQUIDITY   = 100_000.0   # 流动性门槛 $10万
+            AI_PRICE_LOW       = 0.30        # 价格在 30%-70% 之间才有 AI 价值
+            AI_PRICE_HIGH      = 0.70
+            AI_MIN_PRICE_MOVE  = 0.05        # 近期波动绝对值 > 5%
+
+            ai_eligible = []
+            ai_skip     = []
+            for m in markets:
+                price_in_range = AI_PRICE_LOW <= m.price <= AI_PRICE_HIGH
+                has_big_move   = abs(m.price_change_24h) >= AI_MIN_PRICE_MOVE
+                has_liquidity  = m.liquidity >= AI_MIN_LIQUIDITY
+                if has_liquidity and (price_in_range or has_big_move):
+                    ai_eligible.append(m)
+                else:
+                    ai_skip.append(m)
+
+            _log.info(
+                "AI 前置过滤：%d 个市场符合条件（流动性>=$%.0f 且价格区间/波动），"
+                "%d 个跳过 AI 直接用原始概率",
+                len(ai_eligible), AI_MIN_LIQUIDITY, len(ai_skip),
+            )
+
+            # Further limit by ai_oracle_max_markets (sorted by volume)
+            ai_eligible.sort(key=lambda m: m.volume_24h, reverse=True)
+            ai_eligible = ai_eligible[: self.cfg.ai_oracle_max_markets]
+
+            # Enrich only eligible markets
+            enriched = oracle.enrich_all(ai_eligible)
+            # Rebuild full market list: enriched + skipped
+            enriched_ids = {m.market_id for m in enriched}
+            markets = enriched + [m for m in ai_skip if m.market_id not in enriched_ids]
+            report.ai_oracle_used = True
+
+            _log.info(
+                "AI Oracle 增强完成（实际调用 %d 次，节省 %d 次）",
+                len(ai_eligible), len(ai_skip),
+            )
 
         rc = RiskController(self.cfg)
 

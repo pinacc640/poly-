@@ -115,7 +115,7 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Total account capital in USD")
     p.add_argument("--max-position", type=float, default=0.10, metavar="RATIO",
                    help="Max single position as fraction of capital")
-    p.add_argument("--min-profit", type=float, default=0.50, metavar="USD",
+    p.add_argument("--min-profit", type=float, default=0.10, metavar="USD",
                    help="Minimum expected profit per trade in USD")
     p.add_argument("--min-liquidity", type=float, default=100_000.0, metavar="USD",
                    help="Minimum market liquidity in USD")
@@ -199,13 +199,14 @@ def main() -> None:
     # --- AI Oracle pre-check ---
     if args.use_ai:
         import os
-        if not os.getenv("SILICONFLOW_API_KEY"):
+        # Support both DEEPSEEK_API_KEY (preferred) and legacy SILICONFLOW_API_KEY
+        if not os.getenv("DEEPSEEK_API_KEY") and not os.getenv("SILICONFLOW_API_KEY"):
             log.error(
-                "--use-ai requires SILICONFLOW_API_KEY environment variable. "
-                "Export it and try again."
+                "--use-ai requires DEEPSEEK_API_KEY (or SILICONFLOW_API_KEY) "
+                "environment variable. Export it and try again."
             )
             sys.exit(1)
-        log.info("AI Oracle enabled (DeepSeek-V3 via SiliconFlow) ✓")
+        log.info("AI Oracle enabled (DeepSeek + Brave Search) ✓")
 
     # --- Kalshi health check ---
     if args.arbitrage:
