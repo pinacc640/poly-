@@ -114,8 +114,7 @@ def _format_news_context(results: List[dict]) -> str:
         lines.append(f"{i}. {title}")
         if desc:
             lines.append(f"   {desc}")
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 # ---------------------------------------------------------------------------
 # DeepSeek API helper

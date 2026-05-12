@@ -24,8 +24,7 @@ def main() -> None:
         from polymarket_scanner.ai_oracle import AIOracle
         from polymarket_scanner.mock_data import load_mock_markets
 
-        print("🔮 AI Oracle mode — enriching markets with DeepSeek + Brave Search…
-")
+        print("🔮 AI Oracle mode — enriching markets with DeepSeek + Brave Search…")
 
         try:
             oracle  = AIOracle()                  # reads DEEPSEEK_API_KEY / BRAVE_API_KEY

@@ -123,8 +123,8 @@ class MarketScanner:
 
         # ── Optional: AI Oracle probability enrichment ─────────────
         if self.use_ai:
-            from .ai_oracle import AiOracle
-            oracle = AiOracle(timeout=self.cfg.ai_oracle_timeout)
+            from .ai_oracle import AIOracle
+            oracle = AIOracle(timeout=self.cfg.ai_oracle_timeout)
             if oracle.is_available():
                 # Limit API calls: enrich only top-N markets by volume
                 top = sorted(markets, key=lambda m: m.volume_24h, reverse=True)
