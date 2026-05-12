@@ -275,8 +275,35 @@ def main() -> None:
             print(f"[ERROR] {exc}")
             sys.exit(1)
 
-        markets = oracle.enrich_all(markets)
-        logger.info("AI Oracle 增强完成")
+        # ── AI 前置过滤：只对高价值、高波动市场调用 AI（省钱护城河）──────────
+        AI_MIN_LIQUIDITY   = 100_000.0   # 流动性门槛：$10 万
+        AI_PRICE_LOW       = 0.30        # 价格区间下限（概率在 30%-70% 之间才有价值）
+        AI_PRICE_HIGH      = 0.70        # 价格区间上限
+        AI_MIN_PRICE_MOVE  = 0.05        # 近期价格波动绝对值 > 5%
+
+        ai_eligible   = []
+        ai_skip       = []
+        for m in markets:
+            price_in_range    = AI_PRICE_LOW <= m.price <= AI_PRICE_HIGH
+            has_big_move      = abs(m.price_change_24h) >= AI_MIN_PRICE_MOVE
+            has_liquidity     = m.liquidity >= AI_MIN_LIQUIDITY
+            if has_liquidity and (price_in_range or has_big_move):
+                ai_eligible.append(m)
+            else:
+                ai_skip.append(m)
+
+        logger.info(
+            "AI 前置过滤：%d 个市场符合条件（流动性 >= $%.0f 且价格在区间/有波动）"
+            "，%d 个市场跳过 AI 直接用原始概率",
+            len(ai_eligible), AI_MIN_LIQUIDITY, len(ai_skip),
+        )
+
+        # 仅对符合条件的市场调用 AI，其余保留原始 true_prob（即 Gamma price）
+        enriched_eligible = oracle.enrich_all(ai_eligible)
+        markets = enriched_eligible + ai_skip
+
+        logger.info("AI Oracle 增强完成（实际调用 %d 次，节省 %d 次）",
+                    len(ai_eligible), len(ai_skip))
 
     # ── 4. 运行扫描器 ─────────────────────────────────────────────────────────
     scanner = MarketScanner(cfg=cfg, data_source=lambda: markets)

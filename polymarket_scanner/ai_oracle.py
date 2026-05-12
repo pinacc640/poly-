@@ -192,6 +192,44 @@ def _parse_probability(text: str) -> Optional[float]:
     return None
 
 
+def _parse_response(text: str) -> tuple:
+    """Parse DeepSeek response into (probability, reasoning).
+
+    Handles the structured two-line format:
+        PROBABILITY: 0.72
+        REASONING: <text>
+
+    Falls back to legacy bare-number extraction if the format is missing.
+    Returns (prob_or_None, reasoning_str).
+    """
+    import re
+    probability: Optional[float] = None
+    reasoning: str = ""
+
+    # --- Try structured format first ---
+    prob_match = re.search(r"PROBABILITY\s*:\s*([0-9]*\.?[0-9]+)\s*%?", text, re.IGNORECASE)
+    if prob_match:
+        val = float(prob_match.group(1))
+        if "%" in prob_match.group(0):
+            val /= 100.0
+        if 0.0 <= val <= 1.0:
+            probability = round(val, 4)
+
+    reasoning_match = re.search(r"REASONING\s*:\s*(.+)", text, re.IGNORECASE | re.DOTALL)
+    if reasoning_match:
+        reasoning = reasoning_match.group(1).strip()
+
+    # --- Fallback: bare number extraction (legacy / non-compliant responses) ---
+    if probability is None:
+        probability = _parse_probability(text)
+
+    # If no structured reasoning, use the full response as reasoning
+    if not reasoning and probability is not None:
+        reasoning = text.strip()
+
+    return probability, reasoning
+
+
 # ---------------------------------------------------------------------------
 # Prompt builder
 # ---------------------------------------------------------------------------
@@ -199,8 +237,10 @@ def _build_messages(market: Market, news_context: str) -> List[dict]:
     system_prompt = (
         "You are a probability calibration expert for prediction markets. "
         "Your task is to estimate the true probability of a binary market outcome "
-        "resolving YES. Be concise and output ONLY a single number between 0 and 1 "
-        "(e.g. 0.72). Do not include any other text."
+        "resolving YES.\n\n"
+        "You MUST respond in the following exact format (two lines, nothing else):\n"
+        "PROBABILITY: <decimal between 0 and 1, e.g. 0.72>\n"
+        "REASONING: <one or two sentences explaining the key factors driving your estimate>"
     )
 
     user_content = f"""Market Question:
@@ -213,8 +253,10 @@ Days to expiry: {market.days_to_expiry}
 Latest News Context (from Brave Search):
 {news_context}
 
-Based on the news context above, what is your best estimate of the TRUE probability
-that this market resolves YES? Reply with a single decimal number only (e.g. 0.68)."""
+Based on the news context above, estimate the TRUE probability this market resolves YES.
+Respond ONLY in the required two-line format:
+PROBABILITY: <number>
+REASONING: <your analysis>"""
 
     return [
         {"role": "system",  "content": system_prompt},
@@ -302,8 +344,11 @@ class AIOracle:
             logger.warning("Brave Search returned no results for query: %r", query)
         return _format_news_context(results)
 
-    def _estimate_prob(self, market: Market, news_context: str) -> float:
-        """Call DeepSeek and parse the probability; raises on failure."""
+    def _estimate_prob(self, market: Market, news_context: str) -> tuple:
+        """Call DeepSeek and parse the probability + reasoning; raises on failure.
+
+        Returns (probability: float, reasoning: str).
+        """
         messages = _build_messages(market, news_context)
         response_text = _deepseek_chat(
             messages, self.deepseek_key,
@@ -314,12 +359,12 @@ class AIOracle:
         )
         logger.debug("DeepSeek raw response for %r: %s", market.market_id, response_text)
 
-        prob = _parse_probability(response_text)
+        prob, reasoning = _parse_response(response_text)
         if prob is None:
             raise ValueError(
                 f"Could not parse a probability from DeepSeek response: {response_text!r}"
             )
-        return prob
+        return prob, reasoning
 
     # ------------------------------------------------------------------
     # Public API
@@ -331,8 +376,8 @@ class AIOracle:
         market (with its existing true_prob) is returned unchanged.
         """
         try:
-            news_context = self._get_news_context(market.question)
-            new_prob     = self._estimate_prob(market, news_context)
+            news_context   = self._get_news_context(market.question)
+            new_prob, reasoning = self._estimate_prob(market, news_context)
 
             logger.info(
                 "[%s] true_prob updated: %.4f → %.4f  (search: %s)",
@@ -340,6 +385,11 @@ class AIOracle:
                 market.true_prob,
                 new_prob,
                 "yes" if self._brave_enabled else "no",
+            )
+            logger.info(
+                "[%s] AI Reasoning: %s",
+                market.market_id,
+                reasoning,
             )
 
             # Return a shallow copy with updated true_prob

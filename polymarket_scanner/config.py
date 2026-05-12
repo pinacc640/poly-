@@ -19,8 +19,8 @@ class AccountConfig:
     volatility_cap_ratio: float = 0.20       # total volatility sleeve <= 20%
 
     # --- Minimum profitability gates ---
-    min_absolute_profit: float = 0.50        # USD
-    min_profit_ratio: float = 0.01           # 1% of total capital
+    min_absolute_profit: float = 0.10        # USD  ← lowered from 0.50 to catch more opportunities
+    min_profit_ratio: float = 0.002          # 0.2% of total capital  ← scaled down proportionally
 
     # --- Stable strategy filters ---
     stable_max_days_to_expiry: int = 14
