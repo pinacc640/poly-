@@ -144,6 +144,7 @@ def stable_strategy(
                 suggested_position=round(max_position, 2),
                 expected_profit=round(expected_profit, 2),
                 risk_level=_risk_level(score, ev_per_dollar),
+                side=side,
                 rationale=notes,
             )
         )

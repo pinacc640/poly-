@@ -10,7 +10,7 @@ from typing import List, Literal, Optional
 
 
 # ---------------------------------------------------------------------------
-# Raw market record (the shape a future Polymarket API client would produce)
+# Raw market record
 # ---------------------------------------------------------------------------
 @dataclass
 class Market:
@@ -24,19 +24,20 @@ class Market:
     price_change_24h: float          # signed delta in YES price over last 24h
     days_to_expiry: int
     true_prob: float                 # analyst / model estimate of fair prob
-    has_political_shock: bool = False         # sudden headline risk
-    has_fundamental_change: bool = False      # disqualifies vol arbitrage
+    has_political_shock: bool = False
+    has_fundamental_change: bool = False
 
     @property
     def volume_increasing(self) -> bool:
-        """Crude proxy for rising interest."""
         return self.volume_24h > self.volume_prev_24h
 
     @property
     def is_macro(self) -> bool:
-        # Matching is done against the config blocklist in the strategy,
-        # but this convenience property is handy for tests/debugging.
         return self.category.lower() in {"oil", "gold", "war", "geopolitics"}
+
+    def polymarket_url(self) -> str:
+        """Best-effort link to the market page on Polymarket."""
+        return f"https://polymarket.com/event/{self.market_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +51,8 @@ class StableOpportunity:
     suggested_position: float        # USD
     expected_profit: float           # USD
     risk_level: Literal["Low", "Medium", "High"]
+    side: str = "YES"                # "YES" or "NO"
+    take_profit_price: float = 0.0   # TP limit price: entry + (true_prob - entry) * 0.80
     rationale: List[str] = field(default_factory=list)
 
 
@@ -57,12 +60,32 @@ class StableOpportunity:
 class VolatilityOpportunity:
     market: Market
     entry_price: float
-    target_price: float
+    target_price: float              # strategy-computed bracket target
     stop_loss: float
     ev: float
     suggested_position: float        # USD
     expected_profit: float           # USD at target
     max_hold_days: int
+    side: str = "YES"
+    take_profit_price: float = 0.0   # TP limit price (same as target_price for vol)
+    rationale: List[str] = field(default_factory=list)
+
+
+@dataclass
+class SmartMoneyOpportunity:
+    """A market flagged as whale accumulation with price-impact confirmation."""
+    market: Market
+    confidence: Literal["HIGH", "MEDIUM", "LOW"]
+    flow_direction: Literal["BUY", "SELL"]
+    volume_spike_ratio: float        # volume_24h / liquidity
+    price_move_pct: float            # abs(price_change_24h)
+    price_impact_ratio: float        # price_move / (volume/liquidity)  ← NEW
+    is_breakout: bool                # abs(move) > sm_breakout_threshold ← NEW
+    ev: float
+    suggested_position: float        # USD
+    expected_profit: float           # USD
+    side: str = "YES"
+    take_profit_price: float = 0.0
     rationale: List[str] = field(default_factory=list)
 
 
@@ -72,5 +95,5 @@ class VolatilityOpportunity:
 @dataclass
 class RiskDecision:
     approved: bool
-    reasons: List[str] = field(default_factory=list)   # why rejected (if any)
-    approved_position: Optional[float] = None          # possibly downsized
+    reasons: List[str] = field(default_factory=list)
+    approved_position: Optional[float] = None

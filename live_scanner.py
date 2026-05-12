@@ -279,13 +279,29 @@ def main() -> None:
         logger.info("AI Oracle 增强完成")
 
     # ── 4. 运行扫描器 ─────────────────────────────────────────────────────────
-    scanner = MarketScanner(cfg=cfg, data_source=lambda: markets)
-    report  = scanner.run()
+    scanner        = MarketScanner(cfg=cfg, data_source=lambda: markets)
+    report         = scanner.run()
+    report.ai_oracle_used = args.use_ai
 
     # ── 5. 输出报告 ───────────────────────────────────────────────────────────
     if using_mock:
         print("⚠️  注意：Gamma API 不可用，当前结果基于 mock 数据\n")
     print(format_report(report))
+
+    # ── 6. Telegram 推送（如已配置）─────────────────────────────────────────
+    from polymarket_scanner.notifier import TelegramNotifier
+    notifier = TelegramNotifier()
+    if notifier.is_enabled():
+        total_approved = (
+            len(report.stable_approved)
+            + len(report.volatility_approved)
+            + len(report.smart_money_approved)
+        )
+        if total_approved > 0:
+            sent = notifier.send_report(report)
+            logger.info("📱 Telegram: %d 条推送已发送", sent)
+        else:
+            logger.info("📱 Telegram: 无合规机会，跳过推送")
 
 
 if __name__ == "__main__":

@@ -100,6 +100,7 @@ def volatility_strategy(
                 suggested_position=round(max_position, 2),
                 expected_profit=round(expected_profit, 2),
                 max_hold_days=cfg.vol_max_hold_days,
+                side=side,
                 rationale=[
                     f"side={side}",
                     f"24h move {m.price_change_24h:+.2%}",
