@@ -61,6 +61,19 @@ def _fmt_order_block(advice: OrderBookAdvice) -> str:
     )
 
 
+def _fmt_tp_line(opp) -> str:
+    """Format the Take Profit line (Phase 3)."""
+    tp = getattr(opp, "take_profit_price", 0.0)
+    if not tp:
+        return "    🎯 Take Profit:      (not set)"
+    entry = opp.market.price
+    pct   = (tp - entry) / entry * 100 if entry > 0 else 0
+    return (
+        f"    🎯 Take Profit:      {tp:.4f}  "
+        f"(entry {entry:.4f} → +{pct:.1f}%  |  80% of AI edge captured)"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Per-opportunity formatters
 # ---------------------------------------------------------------------------
@@ -83,6 +96,7 @@ def _fmt_stable(opp: StableOpportunity, decision: RiskDecision) -> str:
         f"    Rationale:         {notes}\n"
         f"{_THIN_DIV}\n"
         f"{kelly_block}\n"
+        f"{_fmt_tp_line(opp)}\n"
         f"{order_block}"
     )
 
@@ -107,6 +121,7 @@ def _fmt_volatility(opp: VolatilityOpportunity, decision: RiskDecision) -> str:
         f"    Rationale:         {notes}\n"
         f"{_THIN_DIV}\n"
         f"{kelly_block}\n"
+        f"{_fmt_tp_line(opp)}\n"
         f"{order_block}"
     )
 
@@ -119,6 +134,9 @@ def _fmt_smart_money(opp: SmartMoneyOpportunity, decision: RiskDecision) -> str:
     badge  = {"HIGH": "🔴 HIGH", "MEDIUM": "🟡 MEDIUM", "LOW": "⚪ LOW"}.get(
         opp.confidence, opp.confidence
     )
+    # Phase 3: price-impact and breakout display
+    impact_str   = f"{opp.price_impact_ratio:.3f}" if opp.price_impact_ratio > 0 else "n/a"
+    breakout_tag = "✅ breakout" if opp.is_breakout else "⚠ no breakout"
 
     kelly_block = _fmt_kelly_block(decision.kelly_f, decision.kelly_position, pos)
     order_block = _fmt_order_block(opp.order_advice)
@@ -126,15 +144,17 @@ def _fmt_smart_money(opp: SmartMoneyOpportunity, decision: RiskDecision) -> str:
     return (
         f"  - Market:            {opp.market.question}\n"
         f"    ID:                {opp.market.market_id}  |  Category: {opp.market.category}\n"
-        f"    Confidence:        {badge}\n"
+        f"    Confidence:        {badge}  |  {breakout_tag}\n"
         f"    Flow:              {opp.flow_direction}  "
         f"|  Vol/Liq={opp.volume_spike_ratio:.2f}  "
-        f"|  Price Move={opp.price_move_pct:+.1%}\n"
+        f"|  Price Move={opp.price_move_pct:+.1%}  "
+        f"|  Impact={impact_str}\n"
         f"    EV (per $1):       {opp.ev:+.4f}\n"
         f"    Expected Profit:   ${profit:.2f}\n"
         f"    Signals:           {notes}\n"
         f"{_THIN_DIV}\n"
         f"{kelly_block}\n"
+        f"{_fmt_tp_line(opp)}\n"
         f"{order_block}"
     )
 
@@ -174,6 +194,7 @@ def _kelly_legend(cfg) -> str:
         f"  Kelly settings:  fraction=¼ ({cfg.kelly_fraction:.2f})"
         f"  |  cap={cfg.max_kelly_position_ratio:.0%} of capital"
         f"  |  Maker threshold={cfg.taker_spread_threshold:.2f}"
+        f"  |  TP capture={cfg.tp_capture_ratio:.0%}"
     )
 
 

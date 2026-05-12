@@ -1,39 +1,17 @@
-"""Smart Money accumulation strategy.
+"""Smart Money accumulation strategy — Phase 3: price-impact whale filter.
 
-Thesis
-------
-When large, informed players ("smart money") take a position on
-Polymarket, two footprints appear simultaneously:
+Phase 3 upgrade: wash-trading detection via price_impact_ratio.
 
-  1. **Volume spike** — 24h volume is unusually high relative to the
-     resting liquidity (volume / liquidity ratio >> 1).  Passive
-     liquidity providers don't create this; aggressive order flow does.
+    price_impact_ratio = abs(price_change_24h) / (volume_24h / liquidity)
 
-  2. **Directional price move** — the price drifts strongly in one
-     direction (>= sm_min_price_move) while volume is elevated,
-     indicating that the flow is *one-sided*, not two-way noise.
+Real whale flow moves price substantially per unit of volume/liquidity
+pressure. Wash trading shows high volume but near-zero price movement
+→ price_impact_ratio is tiny → rejected.
 
-  3. **Raw volume threshold** — absolute 24h volume >= sm_min_volume_24h
-     rules out thin markets where a single retail trade looks like a
-     spike.
-
-When all three signals fire we assign HIGH confidence and apply a
-larger EV edge (sm_high_confidence_edge).  When only the volume +
-price-move signals fire we assign MEDIUM.  Volume alone gives LOW.
-
-The EV edge is the key modelling assumption: we trust that the entity
-moving price has better information than the market consensus, so we
-adjust true_prob upward (for a BUY signal) or downward (for a SELL).
-
-Limitations / known caveats
-----------------------------
-- We cannot distinguish genuine informed flow from a single whale
-  who is simply wrong.
-- Price moves near expiry can look like smart-money even for
-  trivially settling markets — the stable_strategy is better suited
-  for those.
-- This strategy should be used as a *filter* to surface candidates
-  for human review, not as a fully autonomous signal.
+Confidence levels (with Phase 3 filter):
+    HIGH   = vol spike + price move + vol/liq ratio + price_impact passes + breakout
+    MEDIUM = vol spike + price move + price_impact passes (no full breakout)
+    LOW    = vol spike only → DROPPED (potentially wash trading)
 """
 
 from typing import List, Literal, Tuple
@@ -53,6 +31,20 @@ def _vol_liq_ratio(market: Market) -> float:
     return market.volume_24h / market.liquidity
 
 
+def _price_impact_ratio(market: Market) -> float:
+    """Whale filter: abs(Δprice) / (volume / liquidity).
+
+    High ratio = volume is actually moving the book = real conviction.
+    Near-zero ratio with high volume = wash trading = reject.
+    """
+    if market.liquidity <= 0:
+        return 0.0
+    vol_pressure = market.volume_24h / market.liquidity
+    if vol_pressure <= 0:
+        return 0.0
+    return abs(market.price_change_24h) / vol_pressure
+
+
 def _flow_direction(market: Market) -> Literal["BUY", "SELL"]:
     """Infer direction from the sign of the 24h price change.
 
@@ -69,6 +61,7 @@ def _confidence(
     """Return (confidence_level, signal_notes).
 
     NONE means the market does not qualify at all.
+    LOW  means volume spike only — potentially wash trading, dropped downstream.
     """
     signals: List[str] = []
     n_signals = 0
@@ -92,11 +85,26 @@ def _confidence(
         n_signals += 1
         signals.append(f"vol/liq={ratio:.2f} ≥ {cfg.sm_min_vol_liq_ratio:.2f}")
 
+    # Phase 3 — price-impact whale filter (wash-trading detection)
+    impact = _price_impact_ratio(market)
+    has_impact = impact >= cfg.sm_min_price_impact_ratio
+    if has_impact:
+        signals.append(f"price_impact={impact:.3f} ≥ {cfg.sm_min_price_impact_ratio:.2f}")
+    else:
+        signals.append(f"price_impact={impact:.3f} < {cfg.sm_min_price_impact_ratio:.2f} ⚠ possible wash-trading")
+
     # Must have at least the volume signal to qualify at all
     if not has_volume:
         return "NONE", signals
 
-    if n_signals == 3:
+    # Without price-impact confirmation, at most LOW (not actionable)
+    if not has_impact:
+        return "LOW", signals
+
+    # Phase 3 — breakout confirmation
+    is_breakout = abs(market.price_change_24h) >= cfg.sm_breakout_threshold
+
+    if n_signals == 3 and is_breakout:
         return "HIGH", signals
     if has_volume and has_move:
         return "MEDIUM", signals
@@ -222,6 +230,8 @@ def smart_money_strategy(
                 suggested_position=round(max_position, 2),
                 expected_profit=round(expected_profit, 2),
                 rationale=rationale,
+                price_impact_ratio=round(_price_impact_ratio(m), 4),
+                is_breakout=abs(m.price_change_24h) >= cfg.sm_breakout_threshold,
             )
         )
 

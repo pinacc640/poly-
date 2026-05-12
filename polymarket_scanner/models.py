@@ -47,6 +47,10 @@ class Market:
     def is_macro(self) -> bool:
         return self.category.lower() in {"oil", "gold", "war", "geopolitics"}
 
+    def polymarket_url(self) -> str:
+        """Best-effort link to the Polymarket event page."""
+        return f"https://polymarket.com/event/{self.market_id}"
+
 
 # ---------------------------------------------------------------------------
 # Order-book execution advice (attached to every opportunity)
@@ -93,6 +97,8 @@ class StableOpportunity:
     kelly_f: float = 0.0             # raw Kelly fraction (before quarter-Kelly cap)
     kelly_position: float = 0.0      # Quarter-Kelly sized USD amount
     order_advice: Optional[OrderBookAdvice] = None
+    # Phase 3: Take Profit price (stamped by RiskController)
+    take_profit_price: float = 0.0
 
 
 @dataclass
@@ -111,6 +117,8 @@ class VolatilityOpportunity:
     kelly_f: float = 0.0
     kelly_position: float = 0.0
     order_advice: Optional[OrderBookAdvice] = None
+    # Phase 3: Take Profit price (stamped by RiskController; equals target_price for vol)
+    take_profit_price: float = 0.0
 
 
 @dataclass
@@ -129,6 +137,10 @@ class SmartMoneyOpportunity:
     kelly_f: float = 0.0
     kelly_position: float = 0.0
     order_advice: Optional[OrderBookAdvice] = None
+    # Phase 3: price-impact whale filter fields + Take Profit
+    price_impact_ratio: float = 0.0  # abs(Δprice) / (vol/liq) — wash-trading filter
+    is_breakout: bool = False         # abs(move) >= sm_breakout_threshold
+    take_profit_price: float = 0.0
 
 
 # ---------------------------------------------------------------------------

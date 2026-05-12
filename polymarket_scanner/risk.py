@@ -40,6 +40,29 @@ Opportunity = Union[StableOpportunity, VolatilityOpportunity, SmartMoneyOpportun
 
 
 # ---------------------------------------------------------------------------
+# Take Profit helper (public — also imported by notifier)
+# ---------------------------------------------------------------------------
+
+def compute_take_profit(entry: float, true_prob: float, side: str, ratio: float) -> float:
+    """Return the suggested Take Profit limit price.
+
+    Captures `ratio` (default 0.80) of the gap between current market
+    price and the AI's fair-value estimate, rather than waiting for
+    the contract to settle at 0 or 1.
+
+    YES: TP = entry + (true_prob - entry) * ratio
+    NO:  TP = entry - (entry - true_prob) * ratio
+
+    Example: entry=0.40, true_prob=0.80, ratio=0.80 → TP=0.72
+    """
+    if side == "YES":
+        tp = entry + (true_prob - entry) * ratio
+    else:
+        tp = entry - (entry - true_prob) * ratio
+    return round(max(0.01, min(0.99, tp)), 4)
+
+
+# ---------------------------------------------------------------------------
 # Kelly helpers
 # ---------------------------------------------------------------------------
 
@@ -222,6 +245,17 @@ class RiskController:
         opp.kelly_f        = round(f_raw, 4)
         opp.kelly_position = round(kelly_pos, 2)
         opp.order_advice   = advice
+
+        # ── Step 5: Take Profit stamping (Phase 3) ─────────────────────────
+        if isinstance(opp, VolatilityOpportunity):
+            opp.take_profit_price = opp.target_price  # bracket already defines exit
+        else:
+            opp.take_profit_price = compute_take_profit(
+                entry     = m.price,
+                true_prob = m.true_prob,
+                side      = side,
+                ratio     = cfg.tp_capture_ratio,
+            )
 
         return RiskDecision(
             approved=True,
