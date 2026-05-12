@@ -31,6 +31,12 @@ class Market:
     best_bid: float = 0.0            # best buy price in the order book
     best_ask: float = 0.0            # best sell price in the order book
 
+    # --- URL slug (bug fix: use events[0].slug, not numeric market_id) ---
+    # Populated by mapper from raw["events"][0]["slug"].
+    # Falls back to raw["slug"] (market-level), then empty string.
+    # Example: "what-will-happen-before-gta-vi"  →  correct Polymarket event page
+    event_slug: str = ""
+
     @property
     def spread(self) -> float:
         """Bid-ask spread. Returns 0 if bid/ask not populated."""
@@ -48,8 +54,18 @@ class Market:
         return self.category.lower() in {"oil", "gold", "war", "geopolitics"}
 
     def polymarket_url(self) -> str:
-        """Best-effort link to the Polymarket event page."""
-        return f"https://polymarket.com/event/{self.market_id}"
+        """Return the canonical Polymarket event page URL.
+
+        Uses events[0].slug (the event-level slug) which maps to
+        https://polymarket.com/event/{slug}.  Falls back to market_id
+        so existing code never breaks even if slug is missing.
+
+        Confirmed via live Gamma API:
+          raw["events"][0]["slug"] → "what-will-happen-before-gta-vi"   ← correct
+          raw["id"]                → "540817"                            ← causes 404
+        """
+        slug = self.event_slug or self.market_id
+        return f"https://polymarket.com/event/{slug}"
 
 
 # ---------------------------------------------------------------------------

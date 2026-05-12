@@ -135,6 +135,49 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _is_market_tradeable(raw: Dict[str, Any]) -> bool:
+    """Bug fix: reject dead / resolved / non-active markets before any EV calc.
+
+    Checks four boolean fields from the Gamma API response:
+      active         – must be True  (market is live)
+      closed         – must be False (not settled/closed)
+      archived       – must be False (not archived)
+      acceptingOrders– must not be False (order book is open)
+
+    Missing fields are treated conservatively (absent = skip).
+    This runs BEFORE price parsing so we never calculate EV on dead markets.
+    """
+    if raw.get("active") is not True:
+        return False
+    if raw.get("closed") is True:
+        return False
+    if raw.get("archived") is True:
+        return False
+    if raw.get("acceptingOrders") is False:
+        return False
+    return True
+
+
+def _extract_event_slug(raw: Dict[str, Any]) -> str:
+    """Bug fix: extract the event-level slug for correct Polymarket URL.
+
+    Confirmed from live Gamma API response:
+      raw["events"][0]["slug"] → "what-will-happen-before-gta-vi"  ← maps to
+      https://polymarket.com/event/what-will-happen-before-gta-vi   ← correct URL
+
+      raw["id"]   → "540817"          ← numeric ID, causes 404
+      raw["slug"] → "new-rhianna-..."  ← market-level slug, also wrong for URL
+
+    Falls back gracefully: events[0].slug → raw["slug"] → empty string.
+    """
+    events = raw.get("events") or []
+    if isinstance(events, list) and events:
+        event_slug = (events[0] or {}).get("slug", "")
+        if event_slug:
+            return str(event_slug)
+    return str(raw.get("slug") or "")
+
+
 def _parse_yes_price(raw: Dict[str, Any]) -> float:
     """Extract YES price from outcomePrices (JSON-encoded string or list)."""
     op = raw.get("outcomePrices")
@@ -230,6 +273,12 @@ def map_to_market(raw: Dict[str, Any]) -> Optional[Market]:
     Returns None if the record is missing essential fields (price,
     question, id) — the caller should silently skip these.
     """
+    # Bug fix: skip dead / resolved / non-active markets before any EV calc.
+    if not _is_market_tradeable(raw):
+        log.debug("Skipping non-tradeable market: active=%r closed=%r archived=%r acceptingOrders=%r",
+                  raw.get("active"), raw.get("closed"), raw.get("archived"), raw.get("acceptingOrders"))
+        return None
+
     market_id = str(raw.get("id") or raw.get("slug") or "")
     question   = str(raw.get("question") or "").strip()
 
@@ -240,6 +289,13 @@ def map_to_market(raw: Dict[str, Any]) -> Optional[Market]:
     price = _parse_yes_price(raw)
     # Clamp to valid probability range — API occasionally returns 0 or 1 exactly
     price = max(0.001, min(0.999, price))
+
+    # Bug fix: extreme-price filter.
+    # Prices ≤ 0.02 or ≥ 0.98 indicate a near-resolved or effectively dead market.
+    # Trading on them is dangerous (settlement risk, no real edge).
+    if price <= 0.02 or price >= 0.98:
+        log.debug("Skipping extreme-price market %r: price=%.4f", market_id, price)
+        return None
 
     # We use market price as our best available estimate of true probability.
     # In a production system you'd source this from a separate model or oracle.
@@ -254,6 +310,9 @@ def map_to_market(raw: Dict[str, Any]) -> Optional[Market]:
     days            = _days_to_expiry(raw)
 
     best_bid, best_ask = _parse_bid_ask(raw, price)
+
+    # Bug fix: extract event_slug for correct Polymarket URL generation.
+    event_slug = _extract_event_slug(raw)
 
     return Market(
         market_id=market_id,
@@ -270,6 +329,7 @@ def map_to_market(raw: Dict[str, Any]) -> Optional[Market]:
         has_fundamental_change=False,    # no live signal; override manually if needed
         best_bid=best_bid,
         best_ask=best_ask,
+        event_slug=event_slug,
     )
 
 
