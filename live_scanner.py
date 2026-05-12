@@ -1,291 +1,295 @@
 #!/usr/bin/env python3
-"""live_scanner.py — 生产级 CLI 入口，支持真实 Gamma API + 自动降级 mock + AI Oracle RAG。
+"""live_scanner.py — Polymarket 真实市场扫描器
 
-用法示例
+从 Gamma API 拉取当前活跃市场，经过以下策略筛选和风控审批后输出交易机会：
+  - stable_strategy()      稳健收敛（近到期 + 极端价格 + 高流动性）
+  - volatility_strategy()  波动套利（大幅价格移动 fade）
+  - smart_money_strategy() 聪明钱追踪（volume spike + 单边价格偏移）
+  - arbitrage_strategy()   跨平台套利（Polymarket × Kalshi，--arbitrage）
+
+可选 AI 增强：
+  - --use-ai               用 DeepSeek-V3 重新估算每个市场的 true_prob
+
+Phase 3 新增：
+  - Telegram 推送（设置 TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID 环境变量）
+
+用法
+----
+    python live_scanner.py                    # 默认：拉取 200 条，标准配置
+    python live_scanner.py --limit 500        # 更大样本
+    python live_scanner.py --capital 200      # 调整账户资金
+    python live_scanner.py --verbose          # 显示调试日志
+    python live_scanner.py --dry-run          # 只拉数据，跳过策略（测试网络）
+    python live_scanner.py --demo-edge        # 模拟 +15% 信息优势（演示用）
+    python live_scanner.py --use-ai           # 用 AI oracle 替换 true_prob
+    python live_scanner.py --arbitrage        # 启用 Polymarket × Kalshi 套利扫描
+
+环境变量
 --------
-# 基础模式（自动尝试 Gamma API，失败则降级 mock 数据）：
-    python live_scanner.py --capital 70
+    SILICONFLOW_API_KEY    启用 --use-ai 所必须的 API Key
+    DEEPSEEK_API_KEY       (同上，优先级更高)
+    TELEGRAM_BOT_TOKEN     Telegram 推送 Bot Token
+    TELEGRAM_CHAT_ID       Telegram 推送 Chat ID
 
-# 完整 AI Oracle 模式（DeepSeek + Brave 联网搜索）：
-    set DEEPSEEK_API_KEY=sk-...
-    set BRAVE_API_KEY=BSA...
-    python live_scanner.py --use-ai --capital 70
-
-# 强制只用 mock 数据（不尝试 Gamma API）：
-    python live_scanner.py --mock --capital 70
-
-# 调试模式（打印原始 API 响应 + 详细日志）：
-    python live_scanner.py --use-ai --capital 70 --verbose
-
-CLI 参数一览
------------
---capital FLOAT       账户总资金，单位 USD（默认 50）
---use-ai              启用 AI Oracle（需要 DEEPSEEK_API_KEY 环境变量）
---mock                强制使用 mock 数据，跳过 Gamma API
---limit INT           从 Gamma API 最多拉取多少个市场（默认 200）
---min-liquidity FLOAT 市场最低流动性过滤（默认 50000 USD）
---timeout INT         Gamma API / AI API 请求超时秒数（默认 15）
---model STR           DeepSeek 模型名（默认 deepseek-chat）
---max-results INT     Brave Search 每个市场返回条数（默认 5）
---temperature FLOAT   DeepSeek 采样温度（默认 0.2）
---max-tokens INT      DeepSeek 最大返回 token 数（默认 256）
---no-fallback         AI 出错时直接报错（默认静默保留原概率）
---verbose / -v        DEBUG 级别日志
+依赖
+----
+    pip install requests openai
 """
 
-from __future__ import annotations
-
 import argparse
-import datetime
-import json
 import logging
 import sys
-import urllib.error
-import urllib.parse
-import urllib.request
-from typing import List, Optional
+import time
+from typing import List
 
 from polymarket_scanner.config import AccountConfig
 from polymarket_scanner.formatter import format_report
-from polymarket_scanner.mock_data import load_mock_markets
+from polymarket_scanner.gamma_client import GammaClient
+from polymarket_scanner.mapper import map_markets
 from polymarket_scanner.models import Market
-from polymarket_scanner.scanner import MarketScanner
-
-# ---------------------------------------------------------------------------
-# Gamma API 常量
-# ---------------------------------------------------------------------------
-GAMMA_BASE_URL       = "https://gamma-api.polymarket.com"
-GAMMA_MARKETS_URL    = f"{GAMMA_BASE_URL}/markets"
-GAMMA_TIMEOUT        = 10   # 连接超时秒数，超时直接降级
+from polymarket_scanner.scanner import MarketScanner, ScanReport
 
 
 # ---------------------------------------------------------------------------
-# Gamma API — 拉取真实市场数据
+# Logging setup
 # ---------------------------------------------------------------------------
-
-def _gamma_fetch_raw(limit: int, timeout: int) -> List[dict]:
-    """向 Gamma API 请求活跃市场，返回原始 dict 列表。"""
-    params = urllib.parse.urlencode({
-        "active": "true",
-        "closed": "false",
-        "limit":  min(limit, 500),
-    })
-    url = f"{GAMMA_MARKETS_URL}?{params}"
-    req = urllib.request.Request(
-        url,
-        headers={"Accept": "application/json", "User-Agent": "polymarket-scanner/1.0"},
+def _setup_logging(verbose: bool) -> None:
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+        level=level,
+        stream=sys.stderr,
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read()
-        return json.loads(raw.decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"Gamma API HTTP {e.code}: {e.reason}") from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Gamma API 连接失败: {e.reason}") from e
-    except Exception as e:
-        raise RuntimeError(f"Gamma API 未知错误: {e}") from e
-
-
-def _parse_gamma_market(raw: dict) -> Optional[Market]:
-    """把 Gamma API 的单条 market dict 转成内部 Market 对象，解析失败返回 None。"""
-    try:
-        market_id = str(raw.get("id") or raw.get("conditionId") or "").strip()
-        question  = str(raw.get("question") or raw.get("title") or "").strip()
-        if not market_id or not question:
-            return None
-
-        # 价格
-        outcomes = raw.get("outcomePrices") or []
-        if isinstance(outcomes, list) and len(outcomes) >= 1:
-            price = float(outcomes[0])
-        else:
-            price = float(raw.get("lastTradePrice") or 0.5)
-        price = max(0.0, min(1.0, price))
-
-        # 流动性 / 成交量
-        liquidity        = float(raw.get("liquidity")     or 0)
-        volume_24h       = float(raw.get("volume24hr")    or 0)
-        volume_prev_24h  = float(raw.get("volume1wk")     or 0) / 7
-        price_change_24h = float(raw.get("priceChange24h")or 0)
-
-        # 到期天数
-        end_date_str = raw.get("endDate") or raw.get("endDateIso") or ""
-        if end_date_str:
-            try:
-                end_dt = datetime.datetime.fromisoformat(
-                    end_date_str.replace("Z", "+00:00")
-                )
-                now = datetime.datetime.now(datetime.timezone.utc)
-                days_to_expiry = max(0, (end_dt - now).days)
-            except Exception:
-                days_to_expiry = 30
-        else:
-            days_to_expiry = 30
-
-        # 分类
-        tags = raw.get("tags") or []
-        if isinstance(tags, list) and tags:
-            category = (tags[0].get("label") if isinstance(tags[0], dict)
-                        else str(tags[0])).lower()
-        else:
-            category = str(raw.get("category") or "general").lower()
-
-        return Market(
-            market_id        = market_id,
-            question         = question,
-            category         = category,
-            price            = price,
-            liquidity        = liquidity,
-            volume_24h       = volume_24h,
-            volume_prev_24h  = volume_prev_24h,
-            price_change_24h = price_change_24h,
-            days_to_expiry   = days_to_expiry,
-            true_prob        = price,   # AI Oracle 后续覆盖
-        )
-    except Exception:
-        return None
-
-
-def fetch_live_markets(
-    limit: int,
-    min_liquidity: float,
-    timeout: int,
-    logger: logging.Logger,
-) -> Optional[List[Market]]:
-    """从 Gamma API 拉取真实市场。成功返回列表，失败返回 None（调用方降级 mock）。"""
-    logger.info("正在连接 Gamma API，拉取最多 %d 个市场…", limit)
-    try:
-        raw_list = _gamma_fetch_raw(limit, timeout=min(timeout, GAMMA_TIMEOUT))
-    except RuntimeError as e:
-        logger.warning("Gamma API 不可用 (%s)，将自动降级为 mock 数据。", e)
-        return None
-
-    markets: List[Market] = []
-    for raw in raw_list:
-        m = _parse_gamma_market(raw)
-        if m and m.liquidity >= min_liquidity:
-            markets.append(m)
-
-    if not markets:
-        logger.warning("Gamma API 返回 0 条有效市场，将自动降级为 mock 数据。")
-        return None
-
-    logger.info("✅ Gamma API 成功：共 %d 条市场（流动性 >= $%.0f）", len(markets), min_liquidity)
-    return markets
+    if not verbose:
+        logging.getLogger("urllib3").setLevel(logging.WARNING)
+        logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 # ---------------------------------------------------------------------------
-# CLI 参数解析
+# Live data source
 # ---------------------------------------------------------------------------
+class LiveDataSource:
+    """Callable: GammaClient → [Market].
 
+    Parameters
+    ----------
+    demo_edge :
+        Add +0.15 to every market's true_prob to simulate a 15 % edge.
+        USE FOR DEMONSTRATION ONLY.
+    """
+
+    def __init__(self, client: GammaClient, limit: int = 200, demo_edge: bool = False):
+        self._client    = client
+        self._limit     = limit
+        self._demo_edge = demo_edge
+
+    def __call__(self) -> List[Market]:
+        log = logging.getLogger(__name__)
+        log.info("Fetching up to %d markets from Gamma API …", self._limit)
+        t0  = time.monotonic()
+        raw = self._client.fetch_active_markets(limit=self._limit)
+        log.info("API fetch complete: %d raw records in %.1fs",
+                 len(raw), time.monotonic() - t0)
+
+        markets = map_markets(raw)
+        log.info("Mapped to %d Market objects (%d skipped)",
+                 len(markets), len(raw) - len(markets))
+
+        if self._demo_edge:
+            for m in markets:
+                m.true_prob = min(0.999, m.true_prob + 0.15)
+            log.warning(
+                "[DEMO-EDGE] true_prob boosted +15%% on all %d markets. "
+                "NOT real alpha.", len(markets)
+            )
+        return markets
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="live_scanner",
-        description="Polymarket Market Scanner — 真实数据 + AI Oracle 版",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Polymarket live scanner — stable + vol + smart-money + arbitrage",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--capital",       type=float, default=50.0,   metavar="USD",
-                   help="账户总资金 USD（默认 50）")
-    p.add_argument("--use-ai",        action="store_true", default=False,
-                   help="启用 AI Oracle（需要 DEEPSEEK_API_KEY）")
-    p.add_argument("--mock",          action="store_true", default=False,
-                   help="强制使用 mock 数据，跳过 Gamma API")
-    p.add_argument("--limit",         type=int,   default=200,    metavar="N",
-                   help="Gamma API 最多拉取市场数（默认 200）")
-    p.add_argument("--min-liquidity", type=float, default=50_000, metavar="USD",
-                   dest="min_liquidity",
-                   help="最低流动性过滤（默认 50000）")
-    p.add_argument("--timeout",       type=int,   default=15,     metavar="SEC",
-                   help="网络请求超时秒数（默认 15）")
-    p.add_argument("--verbose", "-v", action="store_true", default=False,
-                   help="DEBUG 级别日志")
-
-    ai = p.add_argument_group("AI Oracle 参数（仅 --use-ai 时生效）")
-    ai.add_argument("--model",        type=str,   default="deepseek-chat",
-                    help="DeepSeek 模型名（默认 deepseek-chat）")
-    ai.add_argument("--max-results",  type=int,   default=5, dest="max_results",
-                    help="Brave Search 每市场条数（默认 5）")
-    ai.add_argument("--temperature",  type=float, default=0.2,
-                    help="DeepSeek 采样温度（默认 0.2）")
-    ai.add_argument("--max-tokens",   type=int,   default=256, dest="max_tokens",
-                    help="DeepSeek 最大 token 数（默认 256）")
-    ai.add_argument("--no-fallback",  action="store_true", default=False,
-                    help="AI 出错时抛异常（默认静默保留原概率）")
+    p.add_argument("--limit", type=int, default=200, metavar="N",
+                   help="Max markets to fetch from Gamma API")
+    p.add_argument("--capital", type=float, default=50.0, metavar="USD",
+                   help="Total account capital in USD")
+    p.add_argument("--max-position", type=float, default=0.10, metavar="RATIO",
+                   help="Max single position as fraction of capital")
+    p.add_argument("--min-profit", type=float, default=0.10, metavar="USD",
+                   help="Minimum expected profit per trade in USD")
+    p.add_argument("--min-liquidity", type=float, default=100_000.0, metavar="USD",
+                   help="Minimum market liquidity in USD")
+    p.add_argument("--max-days", type=int, default=14, metavar="DAYS",
+                   help="Max days to expiry for stable strategy")
+    p.add_argument("--dry-run", action="store_true",
+                   help="Fetch and map markets only — skip strategies")
+    p.add_argument("--demo-edge", action="store_true",
+                   help="Simulate +15%% info edge on true_prob. DEMO ONLY.")
+    p.add_argument("--use-ai", action="store_true",
+                   help=(
+                       "Replace true_prob with AI-estimated probability via "
+                       "DeepSeek-V3 (requires SILICONFLOW_API_KEY env var)"
+                   ))
+    p.add_argument("--arbitrage", action="store_true",
+                   help=(
+                       "Enable cross-platform arbitrage scan: "
+                       "match Polymarket markets against Kalshi and flag "
+                       "risk-free spreads (poly_yes + kalshi_no < 0.98)"
+                   ))
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="Enable debug logging")
     return p
 
 
 # ---------------------------------------------------------------------------
-# 主函数
+# Dry-run summary
 # ---------------------------------------------------------------------------
+def _dry_run_summary(markets: List[Market]) -> None:
+    from polymarket_scanner.config import DEFAULT_CONFIG as cfg
+    print("\n" + "─" * 60)
+    print("  DRY-RUN — market sample (no strategy/risk applied)")
+    print("─" * 60)
+    print(f"  Total markets mapped : {len(markets)}")
+    near_expiry = [m for m in markets if m.days_to_expiry <= 14]
+    high_price  = [m for m in markets if m.price >= 0.80 or m.price <= 0.20]
+    liquid      = [m for m in markets if m.liquidity >= cfg.stable_min_liquidity]
+    big_move    = [m for m in markets
+                   if abs(m.price_change_24h) >= cfg.vol_min_abs_price_change_24h]
+    print(f"  Expiry <= 14 days    : {len(near_expiry)}")
+    print(f"  Extreme price        : {len(high_price)}")
+    print(f"  Liquid (>= $100K)   : {len(liquid)}")
+    print(f"  24h move >= 5%       : {len(big_move)}")
+    print()
+    print("  First 5 markets:")
+    for m in markets[:5]:
+        print(f"    [{m.market_id}] {m.question[:60]}")
+        print(f"           price={m.price:.3f}  liq=${m.liquidity:,.0f}"
+              f"  Δ24h={m.price_change_24h:+.2%}  days={m.days_to_expiry}"
+              f"  cat={m.category}")
+    print("─" * 60)
 
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 def main() -> None:
-    args  = _build_parser().parse_args()
-    level = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
+    parser = _build_parser()
+    args   = parser.parse_args()
+    _setup_logging(args.verbose)
+    log = logging.getLogger(__name__)
+
+    # --- Config ---
+    cfg = AccountConfig(
+        total_capital             = args.capital,
+        max_position_ratio        = args.max_position,
+        min_absolute_profit       = args.min_profit,
+        stable_min_liquidity      = args.min_liquidity,
+        vol_min_liquidity         = args.min_liquidity,
+        stable_max_days_to_expiry = args.max_days,
     )
-    logger = logging.getLogger(__name__)
 
-    # ── 1. 账户配置 ──────────────────────────────────────────────────────────
-    cfg = AccountConfig(total_capital=args.capital)
-    logger.info("账户资金: $%.2f", args.capital)
+    # --- Gamma health check ---
+    client = GammaClient()
+    log.info("Checking Gamma API connectivity …")
+    if not client.health_check():
+        log.error("Cannot reach Gamma API. Check network and try again.")
+        sys.exit(1)
+    log.info("Gamma API is reachable ✓")
 
-    # ── 2. 获取市场数据 ───────────────────────────────────────────────────────
-    using_mock = False
-
-    if args.mock:
-        logger.info("--mock 模式：直接使用 mock 数据")
-        markets    = load_mock_markets()
-        using_mock = True
-    else:
-        markets = fetch_live_markets(
-            limit         = args.limit,
-            min_liquidity = args.min_liquidity,
-            timeout       = args.timeout,
-            logger        = logger,
-        )
-        if markets is None:
-            logger.info("已自动降级为 mock 数据，策略逻辑不受影响。")
-            markets    = load_mock_markets()
-            using_mock = True
-
-    src_label = "⚠️  mock 数据" if using_mock else "✅ Gamma API 实时数据"
-    logger.info("数据来源：%s，共 %d 个市场", src_label, len(markets))
-
-    # ── 3. AI Oracle 增强（可选）─────────────────────────────────────────────
+    # --- AI Oracle pre-check ---
     if args.use_ai:
-        from polymarket_scanner.ai_oracle import AIOracle
-
-        print("🔮 AI Oracle 模式 — 正在用 DeepSeek + Brave Search 评估概率…\n")
-        logger.info("AI Oracle: model=%s  timeout=%ds  max_results=%d  temperature=%.2f",
-                    args.model, args.timeout, args.max_results, args.temperature)
-        try:
-            oracle = AIOracle(
-                fallback_on_error = not args.no_fallback,
-                timeout           = args.timeout,
-                model             = args.model,
-                max_results       = args.max_results,
-                temperature       = args.temperature,
-                max_tokens        = args.max_tokens,
+        import os
+        # Support both DEEPSEEK_API_KEY (preferred) and legacy SILICONFLOW_API_KEY
+        if not os.getenv("DEEPSEEK_API_KEY") and not os.getenv("SILICONFLOW_API_KEY"):
+            log.error(
+                "--use-ai requires DEEPSEEK_API_KEY (or SILICONFLOW_API_KEY) "
+                "environment variable. Export it and try again."
             )
-        except ValueError as exc:
-            print(f"[ERROR] {exc}")
             sys.exit(1)
+        log.info("AI Oracle enabled (DeepSeek + Brave Search) ✓")
 
-        markets = oracle.enrich_all(markets)
-        logger.info("AI Oracle 增强完成")
+    # --- Kalshi health check ---
+    if args.arbitrage:
+        from polymarket_scanner.kalshi_client import KalshiClient
+        kalshi = KalshiClient()
+        log.info("Checking Kalshi API connectivity …")
+        if not kalshi.health_check():
+            log.error("Cannot reach Kalshi API. Arbitrage scan disabled.")
+            args.arbitrage = False
+        else:
+            log.info("Kalshi API is reachable ✓")
 
-    # ── 4. 运行扫描器 ─────────────────────────────────────────────────────────
-    scanner = MarketScanner(cfg=cfg, data_source=lambda: markets)
-    report  = scanner.run()
+    data_source = LiveDataSource(
+        client=client,
+        limit=args.limit,
+        demo_edge=args.demo_edge,
+    )
 
-    # ── 5. 输出报告 ───────────────────────────────────────────────────────────
-    if using_mock:
-        print("⚠️  注意：Gamma API 不可用，当前结果基于 mock 数据\n")
+    if args.dry_run:
+        markets = data_source()
+        _dry_run_summary(markets)
+        return
+
+    # --- Full scan ---
+    flags = []
+    if args.use_ai:    flags.append("AI-oracle")
+    if args.arbitrage: flags.append("arbitrage")
+    if args.demo_edge: flags.append("demo-edge +15%")
+    flag_str = f" [{', '.join(flags)}]" if flags else ""
+
+    log.info(
+        "Running scanner (capital=$%.0f, max_pos=%.0f%%, min_profit=$%.2f)%s …",
+        cfg.total_capital,
+        cfg.max_position_ratio * 100,
+        cfg.min_absolute_profit,
+        flag_str,
+    )
+
+    scanner = MarketScanner(
+        cfg           = cfg,
+        data_source   = data_source,
+        use_ai        = args.use_ai,
+        run_arbitrage = args.arbitrage,
+    )
+    report: ScanReport = scanner.run()
+
     print(format_report(report))
+
+    total_approved = (
+        len(report.stable_approved)
+        + len(report.volatility_approved)
+        + len(report.smart_money_approved)
+        + len(report.arbitrage_found)
+    )
+    if total_approved == 0:
+        log.info("No approved opportunities found this scan.")
+
+    # ── Telegram push (Phase 3) ──────────────────────────────────────────────
+    # Reads TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID from environment.
+    # Silently no-ops if either variable is not set.
+    from polymarket_scanner.notifier import TelegramNotifier
+    notifier = TelegramNotifier()
+    if notifier.is_enabled():
+        tradeable = (
+            len(report.stable_approved)
+            + len(report.volatility_approved)
+            + len(report.smart_money_approved)
+        )
+        if tradeable > 0:
+            sent = notifier.send_report(report)
+            log.info("📱 Telegram: sent %d message(s)", sent)
+        else:
+            log.info("📱 Telegram: no approved trade opportunities, skipping push")
+    else:
+        log.debug("Telegram not configured (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set)")
+
+    sys.exit(0)
 
 
 if __name__ == "__main__":
