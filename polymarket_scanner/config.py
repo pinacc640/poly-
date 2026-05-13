@@ -80,7 +80,8 @@ class AccountConfig:
     arb_min_gap: float = 0.05                   # 5% 利润空间才值得关注
 
     # Jaccard 关键词相似度阈值（低于此值直接跳过，不送 AI 验证）
-    arb_jaccard_threshold: float = 0.30
+    # 降低至 0.18 以扩大候选对覆盖面，防止漏掉潜在套利机会
+    arb_jaccard_threshold: float = 0.18
 
     # Kalshi 市场最低流动性（open_interest）
     arb_kalshi_min_oi: float = 1_000.0          # $1000 open interest

@@ -436,14 +436,42 @@ class AIOracle:
 
         n_basic = len(ai_candidates)
 
-        # ── Stage 2: sort by liquidity DESC + hard Top-N cut ─────────────
-        ai_candidates.sort(key=lambda m: m.liquidity, reverse=True)
+        # ── Stage 1.5: 黑马抽样 ──────────────────────────────────────────
+        # 从被基础过滤剔除的市场中，找出流动性排名 Top-50 的候选，
+        # 随机抽取 3 个"潜在黑马"送 AI——防止硬性过滤错失暴利机会。
+        import random as _random
+        DARK_HORSE_POOL   = 50   # 从流动性最高的 N 个被过滤市场中抽样
+        DARK_HORSE_PICK   = 3    # 每次抽取数量
+        dark_horse_ids: set = set()
 
-        top_n      = ai_candidates[:ai_top_n]       # will call AI
-        tail       = ai_candidates[ai_top_n:]        # skip AI, keep raw prob
+        if bypass:
+            # 按流动性降序排列被过滤市场，取前 DARK_HORSE_POOL 个作为候选池
+            pool = sorted(bypass, key=lambda m: m.liquidity, reverse=True)[:DARK_HORSE_POOL]
+            # 确保不重复，且不超过池大小
+            picks = _random.sample(pool, min(DARK_HORSE_PICK, len(pool)))
+            dark_horse_ids = {m.market_id for m in picks}
+            # 将黑马加入待分析候选（插到队尾，不参与 Top-N 流动性排序）
+            ai_candidates.extend(picks)
+            logger.info(
+                "🎲 黑马抽样：从 %d 个被过滤市场（流动性 Top-%d 池）随机抽取 %d 个送 AI：%s",
+                len(bypass),
+                min(DARK_HORSE_POOL, len(bypass)),
+                len(picks),
+                ", ".join(m.question[:30] + "…" for m in picks),
+            )
+
+        # ── Stage 2: sort by liquidity DESC + hard Top-N cut ─────────────
+        # 黑马强制保留：正式候选取 ai_top_n 个（不受黑马影响），
+        # 黑马在此基础上额外追加，总调用数 = ai_top_n + len(dark_horses)
+        dark_horses = [m for m in ai_candidates if m.market_id in dark_horse_ids]
+        regulars    = [m for m in ai_candidates if m.market_id not in dark_horse_ids]
+        regulars.sort(key=lambda m: m.liquidity, reverse=True)
+
+        top_n      = regulars[:ai_top_n] + dark_horses   # 正式 Top-N + 黑马（额外追加）
+        tail       = regulars[ai_top_n:]                  # 剩余正式候选跳过 AI
 
         n_ai_calls = len(top_n)
-        n_skipped  = len(bypass) + len(tail)
+        n_skipped  = len(bypass) - len(dark_horses) + len(tail)
 
         logger.info(
             "AI 前置过滤：%d 个符合基础条件（流动性 >= $%.0f，价格 %.0f%%–%.0f%%），"

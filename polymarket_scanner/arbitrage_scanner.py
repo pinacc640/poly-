@@ -237,25 +237,27 @@ def _verify_market_equivalence(
 ) -> Tuple[str, float]:
     """调用 DeepSeek 判断两个市场是否等价。
 
+    使用精简 Prompt（~50 tokens），节省 API 消耗。
+
     Returns
     -------
     (verdict, confidence)
     verdict: "yes" | "no" | "uncertain"
     confidence: 0..1
     """
+    # 精简 Prompt：截断超长问题，单轮对话，max_tokens=5
+    pm_q  = pm_question[:120]
+    kal_q = kalshi_question[:120]
     prompt = (
-        "You are a prediction market analyst. Determine if the following two "
-        "market questions describe the SAME underlying event and would resolve "
-        "identically (yes/no).\n\n"
-        f'Market A (Polymarket): "{pm_question}"\n'
-        f'Market B (Kalshi):     "{kalshi_question}"\n\n'
-        "Reply with ONLY one word: yes, no, or uncertain."
+        f'A: "{pm_q}"\n'
+        f'B: "{kal_q}"\n'
+        "Same event? Reply: yes / no / uncertain"
     )
     payload = json.dumps({
         "model":       model,
         "messages":    [{"role": "user", "content": prompt}],
         "temperature": 0.0,
-        "max_tokens":  10,
+        "max_tokens":  5,
     }).encode("utf-8")
     req = urllib.request.Request(
         DEEPSEEK_API_URL,

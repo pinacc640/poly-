@@ -35,7 +35,7 @@ CLI 参数一览
   --use-ai              启用 AI Oracle（需要 DEEPSEEK_API_KEY）
   --mock                强制 mock 数据，跳过 Gamma API
   --no-scan             跳过 Phase 1 新机会扫描（仅运行 Phase 2 模块）
-  --limit INT           Gamma API 最多拉取市场数（默认 200）
+  --limit INT           Gamma API 最多拉取市场数（默认 1000，支持翻页）
   --min-liquidity FLOAT 市场最低流动性过滤（默认 50000 USD）
   --timeout INT         网络请求超时秒数（默认 15）
   --verbose / -v        DEBUG 日志
@@ -91,30 +91,55 @@ GAMMA_BASE_URL    = "https://gamma-api.polymarket.com"
 GAMMA_MARKETS_URL = f"{GAMMA_BASE_URL}/markets"
 GAMMA_TIMEOUT     = 10
 
+# Telegram 通知配置（从环境变量读取）
+import os as _os
+TELEGRAM_BOT_TOKEN = _os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = _os.getenv("TELEGRAM_CHAT_ID", "")
+
 
 # ---------------------------------------------------------------------------
 # Gamma API helpers
 # ---------------------------------------------------------------------------
 
 def _gamma_fetch_raw(limit: int, timeout: int) -> List[dict]:
-    params = urllib.parse.urlencode({
-        "active": "true",
-        "closed": "false",
-        "limit":  min(limit, 500),
-    })
-    url = f"{GAMMA_MARKETS_URL}?{params}"
-    req = urllib.request.Request(
-        url, headers={"Accept": "application/json", "User-Agent": "polymarket-scanner/1.0"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"Gamma API HTTP {e.code}: {e.reason}") from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Gamma API 连接失败: {e.reason}") from e
-    except Exception as e:
-        raise RuntimeError(f"Gamma API 未知错误: {e}") from e
+    """向 Gamma API 请求活跃市场，支持翻页，返回原始 dict 列表。
+
+    Gamma API 单次最多返回 500 条，超过时自动翻页直到达到 limit 或无更多数据。
+    """
+    all_raw: List[dict] = []
+    offset = 0
+    page_size = 500  # Gamma API 单页上限
+
+    while len(all_raw) < limit:
+        fetch_size = min(page_size, limit - len(all_raw))
+        params = urllib.parse.urlencode({
+            "active": "true",
+            "closed": "false",
+            "limit":  fetch_size,
+            "offset": offset,
+        })
+        url = f"{GAMMA_MARKETS_URL}?{params}"
+        req = urllib.request.Request(
+            url, headers={"Accept": "application/json", "User-Agent": "polymarket-scanner/1.0"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                page = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(f"Gamma API HTTP {e.code}: {e.reason}") from e
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"Gamma API 连接失败: {e.reason}") from e
+        except Exception as e:
+            raise RuntimeError(f"Gamma API 未知错误: {e}") from e
+
+        if not page:
+            break
+        all_raw.extend(page)
+        if len(page) < fetch_size:
+            break  # 服务端已无更多数据
+        offset += len(page)
+
+    return all_raw
 
 
 def _parse_gamma_market(raw: dict) -> Optional[Market]:
@@ -165,7 +190,7 @@ def _parse_gamma_market(raw: dict) -> Optional[Market]:
 def fetch_live_markets(
     limit: int, min_liquidity: float, timeout: int, logger: logging.Logger,
 ) -> Optional[List[Market]]:
-    logger.info("正在连接 Gamma API，拉取最多 %d 个市场…", limit)
+    logger.info("正在连接 Gamma API，拉取最多 %d 个市场（支持翻页）…", limit)
     try:
         raw_list = _gamma_fetch_raw(limit, timeout=min(timeout, GAMMA_TIMEOUT))
     except RuntimeError as e:
@@ -173,6 +198,10 @@ def fetch_live_markets(
         return None
 
     markets = [m for raw in raw_list if (m := _parse_gamma_market(raw)) and m.liquidity >= min_liquidity]
+    logger.info(
+        "Gamma API 原始返回 %d 条，过滤后（流动性 >= $%.0f）%d 条",
+        len(raw_list), min_liquidity, len(markets),
+    )
     if not markets:
         logger.warning("Gamma API 返回 0 条有效市场，将自动降级为 mock 数据。")
         return None
@@ -182,8 +211,122 @@ def fetch_live_markets(
 
 
 # ---------------------------------------------------------------------------
-# CLI 参数解析
+# Telegram 通知助手
 # ---------------------------------------------------------------------------
+
+def _send_telegram(token: str, chat_id: str, text: str, logger: logging.Logger) -> None:
+    """向 Telegram 发送消息（失败仅警告，不中断主流程）。"""
+    if not token or not chat_id:
+        logger.debug("Telegram 未配置（TOKEN 或 CHAT_ID 为空），跳过发送。")
+        return
+    url     = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = json.dumps({
+        "chat_id":    chat_id,
+        "text":       text[:4096],   # Telegram 单条消息上限 4096 字符
+        "parse_mode": "HTML",
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data    = payload,
+        headers = {"Content-Type": "application/json"},
+        method  = "POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+        if result.get("ok"):
+            logger.info("✅ Telegram 简报已发送（chat_id=%s）", chat_id)
+        else:
+            logger.warning("Telegram 发送失败：%s", result)
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("Telegram 发送异常：%s", exc)
+
+
+def _build_telegram_summary(
+    scan_report,
+    monitor_report,
+    arb_report,
+    markets_total: int,
+    using_mock: bool,
+) -> str:
+    """构建 Telegram 简报文本（HTML 格式）。"""
+    import datetime as _dt
+    now = _dt.datetime.now().strftime("%m-%d %H:%M")
+    lines = [f"<b>📊 Polymarket 简报  [{now}]</b>"]
+
+    src = "⚠️ mock数据" if using_mock else "✅ Gamma API"
+    lines.append(f"数据来源：{src}  |  检查市场：<b>{markets_total}</b> 个")
+    lines.append("")
+
+    # ── Phase 1：新机会 ────────────────────────────────────────────────
+    if scan_report is not None:
+        n_stable = len(scan_report.stable_approved)
+        n_vol    = len(scan_report.volatility_approved)
+        n_held   = scan_report.already_held_skipped
+        if n_stable + n_vol > 0:
+            lines.append(f"🎯 <b>新机会</b>：稳定 {n_stable} 个  波动 {n_vol} 个")
+            for opp, dec in scan_report.stable_approved[:3]:
+                pos = dec.approved_position or opp.suggested_position
+                lines.append(
+                    f"  • [稳定] {opp.market.question[:45]}…\n"
+                    f"    EV={opp.ev:+.3f}  仓位=${pos:.0f}  风险={opp.risk_level}"
+                )
+            for opp, dec in scan_report.volatility_approved[:3]:
+                pos = dec.approved_position or opp.suggested_position
+                lines.append(
+                    f"  • [波动] {opp.market.question[:45]}…\n"
+                    f"    进场={opp.entry_price:.3f}→{opp.target_price:.3f}  仓位=${pos:.0f}"
+                )
+        else:
+            lines.append("📭 新机会：暂无符合纪律的交易机会")
+        if n_held:
+            lines.append(f"🔒 已分流 {n_held} 个持仓市场至监控")
+    else:
+        lines.append("⏭ Phase 1 扫描已跳过（--no-scan）")
+
+    lines.append("")
+
+    # ── Phase 2a：持仓监控 ─────────────────────────────────────────────
+    if monitor_report is not None:
+        actionable = monitor_report.actionable
+        if actionable:
+            lines.append(f"⚡ <b>持仓预警</b>（{len(actionable)} 条需处理）：")
+            for sig in actionable[:5]:
+                emoji = {"TAKE_PROFIT": "💰", "STOP_LOSS": "🛑", "ADD_POSITION": "➕"}.get(
+                    sig.signal_type, "•"
+                )
+                q = sig.position.question[:40] if sig.position.question else sig.position.market_id[:20]
+                lines.append(
+                    f"  {emoji} [{sig.signal_type}] {q}…\n"
+                    f"    均价={sig.position.avg_price:.3f}  现价={sig.position.current_price:.3f}"
+                    f"  PnL=${sig.position.unrealized_pnl:+.2f}"
+                )
+        else:
+            lines.append(f"✅ 持仓监控：{monitor_report.positions_checked} 个持仓均正常，无需操作")
+    else:
+        lines.append("⏭ 持仓监控未启用")
+
+    lines.append("")
+
+    # ── Phase 2b：套利 ─────────────────────────────────────────────────
+    if arb_report is not None:
+        opps = arb_report.opportunities
+        if opps:
+            lines.append(f"⚡ <b>套利机会</b>（{len(opps)} 个，最大空间 {opps[0].arb_gap:.2%}）：")
+            for opp in opps[:3]:
+                lines.append(
+                    f"  • {opp.pm_market.question[:40]}…\n"
+                    f"    空间={opp.arb_gap:.2%}  {opp.recommended_action}"
+                )
+        else:
+            lines.append(
+                f"📭 套利扫描：检查 {arb_report.pm_markets_checked} PM × "
+                f"{arb_report.kalshi_markets_fetched} Kalshi，暂无套利机会"
+            )
+    else:
+        lines.append("⏭ 套利扫描未启用")
+
+    return "\n".join(lines)
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -201,8 +344,8 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="强制 mock 数据，跳过 Gamma API")
     p.add_argument("--no-scan",       action="store_true", default=False, dest="no_scan",
                    help="跳过 Phase 1 新机会扫描（仅运行 --monitor / --arb）")
-    p.add_argument("--limit",         type=int,   default=200,     metavar="N",
-                   help="Gamma API 最多拉取市场数（默认 200）")
+    p.add_argument("--limit",         type=int,   default=1000,     metavar="N",
+                   help="Gamma API 最多拉取市场数（默认 1000，支持翻页）")
     p.add_argument("--min-liquidity", type=float, default=50_000,  metavar="USD",
                    dest="min_liquidity", help="最低流动性过滤（默认 50000）")
     p.add_argument("--timeout",       type=int,   default=15,      metavar="SEC",
@@ -255,6 +398,18 @@ def _build_parser() -> argparse.ArgumentParser:
     ai.add_argument("--monitor-ai-top-n", type=int,   default=10, dest="monitor_ai_top_n",
                     help="持仓监控 AI 深度分析数量上限（默认 10）")
 
+    # ── Telegram 参数 ─────────────────────────────────────────────────────
+    tg = p.add_argument_group(
+        "Telegram 参数",
+        "程序结束时发送简报。Token/ChatID 可通过 CLI 或环境变量 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 配置。",
+    )
+    tg.add_argument("--tg-token",   type=str, default=None, dest="tg_token",
+                    metavar="TOKEN", help="Telegram Bot Token（覆盖环境变量）")
+    tg.add_argument("--tg-chat",    type=str, default=None, dest="tg_chat",
+                    metavar="CHAT_ID", help="Telegram Chat ID（覆盖环境变量）")
+    tg.add_argument("--no-telegram", action="store_true", default=False, dest="no_telegram",
+                    help="禁用 Telegram 通知")
+
     return p
 
 
@@ -281,6 +436,18 @@ def main() -> None:
         monitor_ai_top_n = args.monitor_ai_top_n,
     )
     logger.info("账户资金: $%.2f", args.capital)
+
+    # ── 1b. Telegram 配置 ────────────────────────────────────────────────
+    tg_token   = getattr(args, "tg_token",  None) or TELEGRAM_BOT_TOKEN
+    tg_chat_id = getattr(args, "tg_chat",   None) or TELEGRAM_CHAT_ID
+    tg_token   = (tg_token   or "").strip()
+    tg_chat_id = (tg_chat_id or "").strip()
+    no_tg      = getattr(args, "no_telegram", False)
+    tg_enabled = bool(tg_token and tg_chat_id and not no_tg)
+    if tg_enabled:
+        logger.info("📢 Telegram 通知已启用（chat_id=%s…）", tg_chat_id[:8])
+    else:
+        logger.info("📢 Telegram 通知未启用（未配置 token/chat_id 或传了 --no-telegram）")
 
     # ── 2. 持仓查询（公开 Data API）──────────────────────────────────────
     fetcher = PositionFetcher(address=args.address, timeout=args.timeout)
@@ -423,6 +590,17 @@ def main() -> None:
     # 若什么都没运行
     if scan_report is None and monitor_report is None and arb_report is None:
         print("未运行任何扫描模块。请加上 --use-ai / --monitor / --arb 参数之一。")
+
+    # ── 9. Telegram 简报（无论有无机会，只要启用就发送）──────────────────
+    if tg_enabled:
+        summary = _build_telegram_summary(
+            scan_report    = scan_report,
+            monitor_report = monitor_report,
+            arb_report     = arb_report,
+            markets_total  = len(markets),
+            using_mock     = using_mock,
+        )
+        _send_telegram(tg_token, tg_chat_id, summary, logger)
 
 
 if __name__ == "__main__":
