@@ -25,12 +25,19 @@ CLI 参数一览
 --limit INT           从 Gamma API 最多拉取多少个市场（默认 200）
 --min-liquidity FLOAT 市场最低流动性过滤（默认 50000 USD）
 --timeout INT         Gamma API / AI API 请求超时秒数（默认 15）
+--verbose / -v        DEBUG 级别日志
+
+持仓参数（查询无需任何 API Key，只需钱包地址）
+--address 0x…         Signer 地址；也可设置 POLY_ADDRESS 环境变量
+--show-positions      只打印持仓概览后退出（不运行扫描）
+--no-position-filter  禁用持仓去重
+
+AI Oracle 参数（仅 --use-ai 时生效）
 --model STR           DeepSeek 模型名（默认 deepseek-chat）
 --max-results INT     Brave Search 每个市场返回条数（默认 5）
 --temperature FLOAT   DeepSeek 采样温度（默认 0.2）
 --max-tokens INT      DeepSeek 最大返回 token 数（默认 256）
 --no-fallback         AI 出错时直接报错（默认静默保留原概率）
---verbose / -v        DEBUG 级别日志
 """
 
 from __future__ import annotations
@@ -202,22 +209,30 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--verbose", "-v", action="store_true", default=False,
                    help="DEBUG 级别日志")
 
-    wallet = p.add_argument_group("钱包 / 持仓参数（用于持仓去重 + 止盈止损监控）")
-    wallet.add_argument("--private-key",  type=str, default=None, dest="private_key",
-                        metavar="HEX",
-                        help="64 位十六进制私钥（不含 0x）；也可设置 POLY_PRIVATE_KEY 环境变量")
-    wallet.add_argument("--signer-addr",  type=str, default=None, dest="signer_addr",
-                        metavar="0x…",
-                        help="EOA / Signer 地址；也可设置 POLY_SIGNER_ADDR 环境变量")
-    wallet.add_argument("--proxy-addr",   type=str, default=None, dest="proxy_addr",
-                        metavar="0x…",
-                        help="Proxy 钱包地址（用于 Data API fallback）；也可设置 POLY_PROXY_ADDR")
-    wallet.add_argument("--show-positions", action="store_true", default=False,
-                        dest="show_positions",
-                        help="打印当前持仓概览后退出（不运行扫描）")
-    wallet.add_argument("--no-position-filter", action="store_true", default=False,
-                        dest="no_position_filter",
-                        help="禁用持仓去重（即使配置了钱包，也会推送已持仓市场）")
+    wallet = p.add_argument_group(
+        "持仓参数",
+        "持仓查询使用 Polymarket 公开 Data API，只需提供钱包地址即可（无需私钥或签名）。\n"
+        "Relayer API Key 用于下单，与查询持仓无关。",
+    )
+    wallet.add_argument(
+        "--address", type=str, default=None, dest="address",
+        metavar="0x…",
+        help=(
+            "Signer / Proxy 钱包地址（0x 格式）。\n"
+            "也可设置环境变量 POLY_ADDRESS。\n"
+            "例：0x1139Fe3b54cF43A2aAD1E6E8C09aedf73E5270bf"
+        ),
+    )
+    wallet.add_argument(
+        "--show-positions", action="store_true", default=False,
+        dest="show_positions",
+        help="只打印当前持仓概览后退出，不运行市场扫描。",
+    )
+    wallet.add_argument(
+        "--no-position-filter", action="store_true", default=False,
+        dest="no_position_filter",
+        help="禁用持仓去重过滤（已持仓的市场也会出现在推荐列表中）。",
+    )
 
     ai = p.add_argument_group("AI Oracle 参数（仅 --use-ai 时生效）")
     ai.add_argument("--model",        type=str,   default="deepseek-chat",
@@ -251,12 +266,10 @@ def main() -> None:
     cfg = AccountConfig(total_capital=args.capital)
     logger.info("账户资金: $%.2f", args.capital)
 
-    # ── 2. 持仓查询（认证 + 去重）────────────────────────────────────────────
+    # ── 2. 持仓查询（公开 Data API，只需地址）────────────────────────────────
     fetcher = PositionFetcher(
-        private_key_hex = args.private_key,
-        signer_address  = args.signer_addr,
-        proxy_address   = args.proxy_addr,
-        timeout         = args.timeout,
+        address = args.address,
+        timeout = args.timeout,
     )
 
     # --show-positions 模式：只打印持仓，不扫描
@@ -264,13 +277,13 @@ def main() -> None:
         fetcher.print_summary()
         return
 
-    held_ids = set()
+    held_ids: set = set()
     if not args.no_position_filter:
         held_ids = fetcher.held_market_ids()
         if held_ids:
-            logger.info("🔒 已加载 %d 个持仓市场，扫描将跳过这些标的。", len(held_ids))
+            logger.info("🔒 已持仓 %d 个市场，扫描将跳过这些标的（防止重复买入）。", len(held_ids))
         else:
-            logger.info("📭 无持仓记录（或未配置钱包），不做去重过滤。")
+            logger.info("📭 当前无持仓，全量扫描。")
     else:
         logger.info("--no-position-filter: 持仓去重已禁用。")
 
