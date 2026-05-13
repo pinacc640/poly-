@@ -1,12 +1,16 @@
-"""Portfolio Sync — fetch on-chain positions from Polymarket CLOB API.
+"""Portfolio Sync — fetch on-chain positions from Polymarket Data API.
 
-Reads active positions for a given wallet address (Proxy Address) from the
-Polymarket CLOB API, then writes them to a local portfolio.json file.
+Uses the public Polymarket Data API (no HMAC auth required):
+  GET https://data-api.polymarket.com/positions?user={address}
+
+Writes results to a local portfolio.json file.
 
 Environment Variables
 ---------------------
-POLY_WALLET_ADDRESS : Your Polymarket Proxy Address (0x…)
-                      Default: the hardcoded address passed to sync_portfolio()
+POLY_WALLET_ADDRESS : Signer / proxy address (0x…)
+                      Default: hardcoded signer address below
+POLY_API_KEY        : Optional Data API key for higher rate limits
+                      Default: hardcoded key below
 
 Usage
 -----
@@ -30,9 +34,15 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-CLOB_API_URL    = "https://clob.polymarket.com"
+DATA_API_URL    = "https://data-api.polymarket.com"
 GAMMA_API_URL   = "https://gamma-api.polymarket.com"
-DEFAULT_WALLET  = "0xbF5B386FCC49FFe6d1Fc3dA202cF8A799043Dc6b"
+
+# Signer address (from Polymarket settings → "Signer Address")
+DEFAULT_WALLET  = "0x1139Fe3b54cf43A2AAD1E6E8C09aedf73E5270bf"
+
+# Data API key (public/semi-public; set POLY_API_KEY env var to override)
+DEFAULT_API_KEY = "019e2104-08f9-755c-ba70-404342688f5e"
+
 PORTFOLIO_FILE  = "portfolio.json"
 REQUEST_TIMEOUT = 15
 
@@ -59,12 +69,15 @@ class Position:
 # HTTP helper
 # ---------------------------------------------------------------------------
 
-def _http_get(url: str, timeout: int = REQUEST_TIMEOUT) -> Optional[object]:
+def _http_get(url: str, api_key: str = "", timeout: int = REQUEST_TIMEOUT) -> Optional[object]:
     """GET url → parsed JSON, or None on error."""
-    req = urllib.request.Request(
-        url,
-        headers={"Accept": "application/json", "User-Agent": "poly-scanner/1.0"},
-    )
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "poly-scanner/1.0",
+    }
+    if api_key:
+        headers["POLY_API_KEY"] = api_key
+    req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
@@ -81,19 +94,16 @@ def _http_get(url: str, timeout: int = REQUEST_TIMEOUT) -> Optional[object]:
 # API fetching
 # ---------------------------------------------------------------------------
 
-def _fetch_positions_gamma(wallet: str) -> List[dict]:
-    """Try Gamma API: GET /users/{address}/positions."""
-    data = _http_get(f"{GAMMA_API_URL}/users/{wallet}/positions")
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict):
-        return data.get("positions") or data.get("data") or []
-    return []
+def _fetch_positions_data_api(wallet: str, api_key: str) -> List[dict]:
+    """Primary: Data API GET /positions?user={address}
 
-
-def _fetch_positions_clob(wallet: str) -> List[dict]:
-    """Try CLOB API: GET /positions?user={address}."""
-    data = _http_get(f"{CLOB_API_URL}/positions?user={wallet}")
+    Polymarket Data API (public, no HMAC):
+      https://data-api.polymarket.com/positions?user=0x...
+    Returns a list of position objects directly.
+    """
+    url = f"{DATA_API_URL}/positions?user={wallet}"
+    log.debug("Data API positions: %s", url)
+    data = _http_get(url, api_key=api_key)
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
@@ -101,13 +111,37 @@ def _fetch_positions_clob(wallet: str) -> List[dict]:
     return []
 
 
+def _fetch_positions_gamma(wallet: str) -> List[dict]:
+    """Fallback: Gamma API GET /users/{address}/positions."""
+    url = f"{GAMMA_API_URL}/users/{wallet}/positions"
+    data = _http_get(url)
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        return data.get("positions") or data.get("data") or []
+    return []
+
+
 def _parse_position(raw: dict) -> Optional[Position]:
-    """Parse a raw API position dict into our Position dataclass."""
+    """Parse a raw Data API position dict into our Position dataclass.
+
+    Data API field reference (from live response inspection):
+      asset          → token/outcome identifier
+      conditionId    → market condition ID (our market_id)
+      market         → market address (fallback id)
+      question       → market question text
+      outcome        → "YES" / "NO" (or index "0" / "1")
+      size           → shares held (string or float)
+      avgPrice       → average entry price (0..1)
+      currentPrice   → latest price (0..1)
+      cashBalance    → USDC value (alternative size field)
+    """
     try:
         market_id = str(
             raw.get("conditionId") or
             raw.get("market") or
             raw.get("marketId") or
+            raw.get("asset") or
             raw.get("id") or ""
         ).strip()
         if not market_id:
@@ -116,15 +150,21 @@ def _parse_position(raw: dict) -> Optional[Position]:
         question = str(
             raw.get("question") or
             raw.get("title") or
-            raw.get("marketQuestion") or ""
+            raw.get("marketQuestion") or
+            raw.get("market_slug") or ""
         )[:120]
 
         # side: "YES" / "NO"
         outcome = str(raw.get("outcome") or raw.get("side") or "").upper()
         side = "NO" if outcome in ("NO", "1") else "YES"
 
-        # size
-        size = float(raw.get("size") or raw.get("shares") or raw.get("amount") or 0)
+        # size — Data API returns float directly
+        size = float(
+            raw.get("size") or
+            raw.get("shares") or
+            raw.get("amount") or
+            raw.get("tokensOwned") or 0
+        )
         if size <= 0:
             return None
 
@@ -132,14 +172,16 @@ def _parse_position(raw: dict) -> Optional[Position]:
         avg_price = float(
             raw.get("avgPrice") or
             raw.get("averagePrice") or
+            raw.get("buyPrice") or
             raw.get("price") or 0
         )
 
-        # current_price (may not be available; default to avg)
+        # current_price
         current_price = float(
             raw.get("currentPrice") or
             raw.get("curPrice") or
             raw.get("lastTradePrice") or
+            raw.get("priceUsd") or
             avg_price
         )
 
@@ -147,7 +189,6 @@ def _parse_position(raw: dict) -> Optional[Position]:
         if side == "YES":
             unrealized_pnl = (current_price - avg_price) * size
         else:
-            # NO side: profit when YES price falls
             unrealized_pnl = ((1 - current_price) - (1 - avg_price)) * size
 
         return Position(
@@ -170,17 +211,21 @@ def _parse_position(raw: dict) -> Optional[Position]:
 
 def sync_portfolio(
     wallet: Optional[str] = None,
+    api_key: Optional[str] = None,
     output_path: str = PORTFOLIO_FILE,
 ) -> Dict[str, Position]:
     """Fetch on-chain positions and write to portfolio.json.
 
-    Tries Gamma API first; falls back to CLOB API.
+    Uses Polymarket Data API (no HMAC auth) as primary source,
+    falls back to Gamma API if Data API returns empty.
 
     Parameters
     ----------
     wallet :
-        Polymarket Proxy Address. Falls back to env POLY_WALLET_ADDRESS
-        or the hardcoded default address.
+        Signer / proxy address. Falls back to env POLY_WALLET_ADDRESS
+        or DEFAULT_WALLET.
+    api_key :
+        Data API key. Falls back to env POLY_API_KEY or DEFAULT_API_KEY.
     output_path :
         Path to the portfolio JSON file (overwritten on every call).
 
@@ -188,21 +233,24 @@ def sync_portfolio(
     -------
     Dict mapping market_id → Position for all active positions.
     """
-    wallet = wallet or os.getenv("POLY_WALLET_ADDRESS", DEFAULT_WALLET)
+    wallet  = wallet  or os.getenv("POLY_WALLET_ADDRESS", DEFAULT_WALLET)
+    api_key = api_key or os.getenv("POLY_API_KEY",        DEFAULT_API_KEY)
     log.info("Syncing portfolio for wallet %s…%s", wallet[:10], wallet[-4:])
 
-    # Try Gamma API first (richer market data)
-    raw_list = _fetch_positions_gamma(wallet)
-    source = "Gamma"
+    # ── Primary: Data API ──────────────────────────────────────────────────
+    raw_list = _fetch_positions_data_api(wallet, api_key)
+    source   = "Data API"
 
+    # ── Fallback: Gamma API ────────────────────────────────────────────────
     if not raw_list:
-        raw_list = _fetch_positions_clob(wallet)
-        source = "CLOB"
+        log.debug("Data API returned empty — trying Gamma API fallback…")
+        raw_list = _fetch_positions_gamma(wallet)
+        source   = "Gamma API"
 
     if not raw_list:
         log.warning(
-            "No positions returned from either API — "
-            "portfolio may be empty or wallet has no active positions."
+            "No positions returned from Data API or Gamma API. "
+            "Wallet %s may have no active positions.", wallet[-8:]
         )
         _write_portfolio({}, output_path)
         return {}
@@ -213,7 +261,10 @@ def sync_portfolio(
         if pos:
             portfolio[pos.market_id] = pos
 
-    log.info("Portfolio sync complete (%s): %d active position(s)", source, len(portfolio))
+    log.info(
+        "Portfolio sync complete (%s): %d active position(s)",
+        source, len(portfolio),
+    )
     _write_portfolio(portfolio, output_path)
     return portfolio
 
