@@ -67,6 +67,23 @@ class VolatilityOpportunity:
 
 
 # ---------------------------------------------------------------------------
+# Position — 账户当前持仓记录
+# ---------------------------------------------------------------------------
+@dataclass
+class Position:
+    market_id:      str            # conditionId / marketId，与 Market.market_id 对应
+    token_id:       str            # ERC-1155 outcome token ID
+    outcome:        str            # "YES" / "NO" 或其他 outcome label
+    size:           float          # 持有份额数量
+    avg_price:      float          # 平均买入价（0..1）
+    current_price:  float          # 当前市价（0..1）
+    cost_basis:     float          # 总成本 USD = size * avg_price
+    market_value:   float          # 当前市值 USD = size * current_price
+    unrealized_pnl: float          # 未实现盈亏 USD = market_value - cost_basis
+    question:       str = ""       # 市场问题描述（可选，用于展示）
+
+
+# ---------------------------------------------------------------------------
 # Risk controller result
 # ---------------------------------------------------------------------------
 @dataclass

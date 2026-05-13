@@ -49,6 +49,7 @@ from polymarket_scanner.config import AccountConfig
 from polymarket_scanner.formatter import format_report
 from polymarket_scanner.mock_data import load_mock_markets
 from polymarket_scanner.models import Market
+from polymarket_scanner.positions import PositionFetcher
 from polymarket_scanner.scanner import MarketScanner
 
 # ---------------------------------------------------------------------------
@@ -201,6 +202,23 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--verbose", "-v", action="store_true", default=False,
                    help="DEBUG 级别日志")
 
+    wallet = p.add_argument_group("钱包 / 持仓参数（用于持仓去重 + 止盈止损监控）")
+    wallet.add_argument("--private-key",  type=str, default=None, dest="private_key",
+                        metavar="HEX",
+                        help="64 位十六进制私钥（不含 0x）；也可设置 POLY_PRIVATE_KEY 环境变量")
+    wallet.add_argument("--signer-addr",  type=str, default=None, dest="signer_addr",
+                        metavar="0x…",
+                        help="EOA / Signer 地址；也可设置 POLY_SIGNER_ADDR 环境变量")
+    wallet.add_argument("--proxy-addr",   type=str, default=None, dest="proxy_addr",
+                        metavar="0x…",
+                        help="Proxy 钱包地址（用于 Data API fallback）；也可设置 POLY_PROXY_ADDR")
+    wallet.add_argument("--show-positions", action="store_true", default=False,
+                        dest="show_positions",
+                        help="打印当前持仓概览后退出（不运行扫描）")
+    wallet.add_argument("--no-position-filter", action="store_true", default=False,
+                        dest="no_position_filter",
+                        help="禁用持仓去重（即使配置了钱包，也会推送已持仓市场）")
+
     ai = p.add_argument_group("AI Oracle 参数（仅 --use-ai 时生效）")
     ai.add_argument("--model",        type=str,   default="deepseek-chat",
                     help="DeepSeek 模型名（默认 deepseek-chat）")
@@ -233,7 +251,30 @@ def main() -> None:
     cfg = AccountConfig(total_capital=args.capital)
     logger.info("账户资金: $%.2f", args.capital)
 
-    # ── 2. 获取市场数据 ───────────────────────────────────────────────────────
+    # ── 2. 持仓查询（认证 + 去重）────────────────────────────────────────────
+    fetcher = PositionFetcher(
+        private_key_hex = args.private_key,
+        signer_address  = args.signer_addr,
+        proxy_address   = args.proxy_addr,
+        timeout         = args.timeout,
+    )
+
+    # --show-positions 模式：只打印持仓，不扫描
+    if args.show_positions:
+        fetcher.print_summary()
+        return
+
+    held_ids = set()
+    if not args.no_position_filter:
+        held_ids = fetcher.held_market_ids()
+        if held_ids:
+            logger.info("🔒 已加载 %d 个持仓市场，扫描将跳过这些标的。", len(held_ids))
+        else:
+            logger.info("📭 无持仓记录（或未配置钱包），不做去重过滤。")
+    else:
+        logger.info("--no-position-filter: 持仓去重已禁用。")
+
+    # ── 3. 获取市场数据 ───────────────────────────────────────────────────────
     using_mock = False
 
     if args.mock:
@@ -255,7 +296,7 @@ def main() -> None:
     src_label = "⚠️  mock 数据" if using_mock else "✅ Gamma API 实时数据"
     logger.info("数据来源：%s，共 %d 个市场", src_label, len(markets))
 
-    # ── 3. AI Oracle 增强（可选）─────────────────────────────────────────────
+    # ── 4. AI Oracle 增强（可选）─────────────────────────────────────────────
     if args.use_ai:
         from polymarket_scanner.ai_oracle import AIOracle
 
@@ -278,13 +319,15 @@ def main() -> None:
         markets = oracle.enrich_all(markets)
         logger.info("AI Oracle 增强完成")
 
-    # ── 4. 运行扫描器 ─────────────────────────────────────────────────────────
-    scanner = MarketScanner(cfg=cfg, data_source=lambda: markets)
+    # ── 5. 运行扫描器（含持仓去重）───────────────────────────────────────────
+    scanner = MarketScanner(cfg=cfg, data_source=lambda: markets, held_market_ids=held_ids)
     report  = scanner.run()
 
-    # ── 5. 输出报告 ───────────────────────────────────────────────────────────
+    # ── 6. 输出报告 ───────────────────────────────────────────────────────────
     if using_mock:
         print("⚠️  注意：Gamma API 不可用，当前结果基于 mock 数据\n")
+    if report.already_held_skipped:
+        print(f"🚫 已跳过 {report.already_held_skipped} 个持仓中的市场（防止重复推送）\n")
     print(format_report(report))
 
 
