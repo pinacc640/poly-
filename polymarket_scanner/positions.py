@@ -217,7 +217,9 @@ class PositionFetcher:
         fetcher.print_summary()
     """
 
-    # 你的固定 Signer 地址（Relayer API Key Address）
+    # Proxy 地址（页面上显示的主地址，持仓存放在这里）
+    KNOWN_PROXY  = "0xbF5B386FCC49FFe6d1Fc3dA202cf8A799043Dc6b"
+    # Signer 地址（Relayer API Key Address，用于下单签名）
     KNOWN_SIGNER = "0x1139Fe3b54cF43A2aAD1E6E8C09aedf73E5270bf"
 
     def __init__(
@@ -225,21 +227,21 @@ class PositionFetcher:
         address: Optional[str] = None,
         timeout: int = REQUEST_TIMEOUT,
     ):
-        # 地址解析优先级：参数 > 环境变量 > 已知地址常量
+        # 地址解析优先级：参数 > 环境变量 > Proxy 地址（持仓在这里）> Signer 地址
         resolved = (
             address
             or os.getenv("POLY_ADDRESS", "")
-            or os.getenv("POLY_SIGNER_ADDR", "")
             or os.getenv("POLY_PROXY_ADDR", "")
+            or os.getenv("POLY_SIGNER_ADDR", "")
         ).strip()
 
-        self.address = resolved or self.KNOWN_SIGNER
+        self.address = resolved or self.KNOWN_PROXY
         self.timeout = timeout
 
         if not resolved:
             logger.info(
-                "PositionFetcher: 未设置 POLY_ADDRESS，使用内置 Signer 地址 %s",
-                self.KNOWN_SIGNER[:12] + "…",
+                "PositionFetcher: 未设置 POLY_ADDRESS，使用内置 Proxy 地址 %s",
+                self.KNOWN_PROXY[:14] + "…",
             )
 
     # ------------------------------------------------------------------
