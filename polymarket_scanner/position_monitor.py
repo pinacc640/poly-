@@ -79,7 +79,8 @@ class PositionMonitor:
             PositionFetcher.fetch_positions() 返回的持仓列表。
         all_markets :
             本轮已拉取的全量 Market 列表（用于查询最新价格/流动性）。
-            若找不到对应 market，则跳过该持仓的 AI 增强，直接用持仓快照数据。
+            即使 all_markets 中没有对应市场，也会用持仓快照构建占位 Market，
+            然后仍然送 AI 增强——AI 增强不受 all_markets 是否匹配的影响。
         oracle :
             AIOracle 实例。若为 None，则跳过 AI 增强，直接用市场原始价格
             作为 true_prob。
@@ -88,51 +89,59 @@ class PositionMonitor:
             logger.info("PositionMonitor: 无持仓，跳过监控。")
             return MonitorReport()
 
-        # ── 建立 market_id → Market 的快速查找表 ──────────────────────
-        market_index: Dict[str, Market] = {m.market_id: m for m in all_markets}
+        # ── 建立 market_id → Market 的快速查找表（来自全量市场列表）──
+        global_index: Dict[str, Market] = {m.market_id: m for m in all_markets}
 
-        # ── 找到持仓对应的 Market 对象 ────────────────────────────────
-        held_markets: List[Market] = []
-        pos_market_pairs: List[tuple[Position, Optional[Market]]] = []
-
+        # ── 为每条持仓准备 Market 对象（保证 100% 覆盖）─────────────
+        # 优先从 all_markets 获取最新价格/流动性；找不到则用持仓快照构建。
+        # 无论哪种来源，后续都会统一送 AI 增强，绝不因找不到就跳过。
+        markets_for_positions: List[Market] = []
         for pos in positions:
-            mkt = market_index.get(pos.market_id)
-            pos_market_pairs.append((pos, mkt))
-            if mkt is not None:
-                held_markets.append(mkt)
+            mkt = global_index.get(pos.market_id)
+            if mkt is None:
+                # all_markets 中没有该持仓对应的市场（例如 --no-scan 场景）
+                # 用持仓快照构建占位对象，true_prob 暂用 current_price，
+                # 随后会被 AI 增强覆盖
+                mkt = _position_to_stub_market(pos)
+                logger.debug(
+                    "PositionMonitor: 市场 %s 不在 all_markets 中，"
+                    "用持仓快照构建占位 Market，将送 AI 增强。",
+                    pos.market_id,
+                )
+            markets_for_positions.append(mkt)
 
-        # ── AI 增强（对已持仓市场，同样应用 Top-N 截断）──────────────
+        # ── AI 增强（独立调用，不受 --no-scan 影响）──────────────────
+        # 持仓监控的 AI 增强是独立的：即使 --no-scan 跳过了新机会 AI 分析，
+        # 这里仍然必须对持仓市场单独调用 AI，否则 true_prob 无意义。
         ai_enriched_count = 0
-        if oracle is not None and held_markets:
+        if oracle is not None:
             logger.info(
-                "PositionMonitor: 对 %d 个持仓市场执行 AI 增强（Top-%d 截断）…",
-                len(held_markets),
+                "PositionMonitor: 对 %d 个持仓市场执行独立 AI 增强（Top-%d 截断）…",
+                len(markets_for_positions),
                 self.cfg.monitor_ai_top_n,
             )
             enriched = oracle.enrich_all(  # type: ignore[union-attr]
-                held_markets,
+                markets_for_positions,
                 ai_top_n=self.cfg.monitor_ai_top_n,
             )
-            # 用 AI 更新后的 Market 替换 index
-            enriched_index: Dict[str, Market] = {m.market_id: m for m in enriched}
-            market_index.update(enriched_index)
+            # 建立 AI 增强后的 index，覆盖占位对象
+            enriched_index = {m.market_id: m for m in enriched}
             ai_enriched_count = len(enriched)
+            logger.info(
+                "PositionMonitor: AI 增强完成，%d 个持仓市场已更新 true_prob。",
+                ai_enriched_count,
+            )
         else:
-            if oracle is None:
-                logger.info("PositionMonitor: 未传入 oracle，使用原始市价作为 true_prob。")
+            logger.info(
+                "PositionMonitor: 未传入 oracle，将使用原始市价作为 true_prob（无 AI 修正）。"
+            )
+            enriched_index = {m.market_id: m for m in markets_for_positions}
 
         # ── 逐条持仓生成信号 ──────────────────────────────────────────
         signals: List[PositionSignal] = []
-        for pos, raw_mkt in pos_market_pairs:
-            # 优先用 AI 更新后的 Market；若找不到则用占位 Market
-            mkt = market_index.get(pos.market_id, raw_mkt)
-            if mkt is None:
-                # 完全找不到市场数据，只能用持仓快照构造一个占位 Market
-                mkt = _position_to_stub_market(pos)
-                logger.debug(
-                    "PositionMonitor: 市场 %s 不在当前 all_markets 中，使用持仓快照。",
-                    pos.market_id,
-                )
+        for pos, base_mkt in zip(positions, markets_for_positions):
+            # 优先使用 AI 增强后的 Market；AI 未处理时退回 base_mkt
+            mkt = enriched_index.get(pos.market_id, base_mkt)
 
             signal = self._evaluate(pos, mkt)
             signals.append(signal)
