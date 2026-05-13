@@ -362,10 +362,11 @@ class AIOracle:
         ai_min_liquidity: float = 100_000.0,
         ai_price_low: float = 0.10,
         ai_price_high: float = 0.90,
+        bypass_filters: bool = False,
     ) -> List[Market]:
         """Enrich a list of markets with AI-estimated probabilities.
 
-        Two-stage pipeline
+        Two-stage pipeline (skipped when bypass_filters=True)
         ------------------
         Stage 1 — Basic pre-filter
             Keep only markets that clear the minimum bars worth sending to
@@ -401,7 +402,25 @@ class AIOracle:
         ai_price_low / ai_price_high :
             Price window outside which markets are considered too extreme
             for meaningful AI correction (default 0.10–0.90).
+        bypass_filters : bool
+            When True, skip Stage 1 (liquidity / price filter) and Stage 2
+            (Top-N cap) entirely — every market in the list is sent to AI.
+            Use this for position monitoring, where each market is already
+            pre-selected and must receive a fresh AI probability regardless
+            of its liquidity or current price level.
         """
+        # ── bypass_filters 模式：跳过全部过滤，直接全量 AI 增强 ─────────
+        if bypass_filters:
+            logger.info(
+                "AI 持仓模式（bypass_filters=True）：对 %d 个持仓市场跳过流动性/价格过滤，"
+                "全量 AI 分析。",
+                len(markets),
+            )
+            enriched: List[Market] = []
+            for m in markets:
+                enriched.append(self.enrich(m))
+            return enriched
+
         # ── Stage 1: basic pre-filter ────────────────────────────────────
         ai_candidates: List[Market] = []
         bypass:        List[Market] = []

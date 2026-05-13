@@ -113,16 +113,22 @@ class PositionMonitor:
         # ── AI 增强（独立调用，不受 --no-scan 影响）──────────────────
         # 持仓监控的 AI 增强是独立的：即使 --no-scan 跳过了新机会 AI 分析，
         # 这里仍然必须对持仓市场单独调用 AI，否则 true_prob 无意义。
+        #
+        # 关键：必须传 bypass_filters=True。
+        # 持仓市场的占位 Market 流动性为 0，且持仓价格可能超出 10%–90% 区间
+        # （如 NO 仓 current_price=0.905），如果走普通过滤，全部会被 Stage 1
+        # 过滤掉，导致 AI 一次都不调用，true_prob 永远等于原始市价。
         ai_enriched_count = 0
         if oracle is not None:
             logger.info(
-                "PositionMonitor: 对 %d 个持仓市场执行独立 AI 增强（Top-%d 截断）…",
+                "PositionMonitor: 对 %d 个持仓市场执行独立 AI 增强（bypass_filters=True，"
+                "跳过流动性/价格过滤，强制全量分析）…",
                 len(markets_for_positions),
-                self.cfg.monitor_ai_top_n,
             )
             enriched = oracle.enrich_all(  # type: ignore[union-attr]
                 markets_for_positions,
                 ai_top_n=self.cfg.monitor_ai_top_n,
+                bypass_filters=True,  # 持仓市场跳过流动性/价格过滤，强制全量 AI
             )
             # 建立 AI 增强后的 index，覆盖占位对象
             enriched_index = {m.market_id: m for m in enriched}
@@ -197,6 +203,8 @@ class PositionMonitor:
         position_price: float = pos.current_price
 
         # ── AI 胜率：mkt.true_prob 是 YES 方向，NO 仓需翻转 ─────────
+        # position_prob 是持仓方向的真实胜率，后续所有判断只能用这个变量，
+        # 绝不能直接使用 mkt.true_prob（那是 YES 方向的原始值）。
         position_prob: float = mkt.true_prob if is_yes else (1.0 - mkt.true_prob)
 
         avg_price = pos.avg_price
