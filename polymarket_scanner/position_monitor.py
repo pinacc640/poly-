@@ -3,51 +3,39 @@
 对已持仓市场进行 AI 增强评估，根据最新胜率和当前价格生成
 止盈 / 止损 / 加仓 / 观察 信号。
 
-方向对齐原则（核心设计）
-─────────────────────────
-market.price     和 market.true_prob 永远表示 YES 方向的数值。
-持仓均价 avg_price 也永远是买入时该方向的价格。
+数据来源与方向对齐原则（核心设计）
+──────────────────────────────────
+① position.current_price  —— 价格判断唯一来源
+    Polymarket Data API 直接返回该持仓方向的最新价格，已经是正确方向的数值：
+    YES 仓 → current_price 是 YES 价；NO 仓 → current_price 是 NO 价。
+    直接使用，绝对不做 1 - x 翻转。
 
-因此：
-  YES 仓：position_price = market.price       position_prob = market.true_prob
-  NO  仓：position_price = 1 - market.price   position_prob = 1 - market.true_prob
+② position.avg_price  —— 与 current_price 同一坐标系
+    API 返回的买入均价，已经是持仓方向的价格，直接使用。
 
-所有信号判断统一使用 position_price / position_prob，
-保证与 avg_price 处于同一坐标系，不会出现方向混乱。
+③ mkt.true_prob  —— AI 胜率，全局统一为 YES 方向
+    仅 NO 仓需要翻转：position_prob = 1 - mkt.true_prob
+    YES 仓直接使用：position_prob = mkt.true_prob
 
 信号触发逻辑（按优先级排列）
 ─────────────────────────────
 TAKE_PROFIT（止盈，优先级最高）
-  条件 A：position_price >= monitor_tp_abs_price（默认 0.90）
-          持仓方向价格已进入极高概率区间，落袋为安
-  条件 B：position_price >= avg_price + monitor_tp_delta（默认 +0.20）
-          相对均价已盈利 20 个价格点
+  条件 A：pos.current_price >= monitor_tp_abs_price（默认 0.90）
+  条件 B：pos.current_price >= avg_price + monitor_tp_delta（默认 +0.20）
   条件 C：days_to_expiry <= monitor_tp_expiry_days（默认 2 天）且 unrealized_pnl > 0
-          临近结算且浮盈
 
 STOP_LOSS（止损 / AI 胜率反转，优先级第二）
   position_prob < avg_price - monitor_sl_ai_reversal（默认 -0.15）
-  即：AI 对持仓方向的估计胜率，相对于买入均价下修超过 0.15
-  含义：AI 认为基本面已显著逆转，建议出清
+  含义：AI 对持仓方向的估计胜率，相对于买入均价下修超过 0.15
 
 ADD_POSITION（加仓，全部满足才触发）
-  A. position_price <= avg_price * monitor_add_discount（默认 0.85，即回落 ≥ 15%）
-  B. position_prob  >= avg_price + monitor_add_ai_edge（默认 +0.10，AI 仍看好）
+  A. pos.current_price <= avg_price * monitor_add_discount（默认 0.85，即回落 ≥ 15%）
+  B. position_prob >= avg_price + monitor_add_ai_edge（默认 +0.10，AI 仍看好）
   C. days_to_expiry >= monitor_add_min_days（默认 3 天）
   D. liquidity >= monitor_add_min_liquidity（默认 $50 000）
 
 WATCH（观察）：满足 ≥ 2 个加仓条件但未全部达标
 HOLD（持仓无需操作）：一切正常
-
-用法
-────
-    from polymarket_scanner.position_monitor import PositionMonitor
-    from polymarket_scanner.positions import PositionFetcher
-
-    positions = PositionFetcher().fetch_positions()
-    monitor   = PositionMonitor(cfg)
-    report    = monitor.run(positions, all_markets, oracle)
-    print(format_monitor_report(report))
 """
 
 from __future__ import annotations
@@ -169,28 +157,38 @@ class PositionMonitor:
     def _evaluate(self, pos: Position, mkt: Market) -> PositionSignal:
         """对单条持仓评估，返回 PositionSignal。
 
-        方向对齐规则
+        数据来源说明
         ──────────────
-        mkt.price     永远是 YES 的市场价格（0..1）
-        mkt.true_prob 永远是 YES 的 AI 胜率估计（0..1）
+        position.current_price
+            API 直接返回的该持仓方向的最新价格，已经是正确方向的数值。
+            YES 仓：current_price 就是 YES 的当前价
+            NO  仓：current_price 就是 NO 的当前价（API 已换算好）
+            → 直接使用，不做任何翻转。
 
-        持仓如果是 NO 方向，需要将两者翻转，才能与持仓均价（avg_price）
-        在同一坐标系下比较：
-            position_price = 1 - mkt.price       （NO 方向的当前市价）
-            position_prob  = 1 - mkt.true_prob   （NO 方向的 AI 胜率）
+        position.avg_price
+            买入时该持仓方向的均价，与 current_price 同一坐标系。
+            → 直接使用，不做任何翻转。
 
-        所有止盈、止损、加仓判断统一使用 position_price / position_prob，
-        不再直接使用 mkt.price / mkt.true_prob，彻底消除方向混乱。
+        mkt.true_prob
+            AI Oracle 估计的 YES 方向概率（全局统一为 YES）。
+            → YES 仓：直接使用（position_prob = mkt.true_prob）
+            → NO  仓：需翻转（position_prob = 1 - mkt.true_prob）
+
+        mkt.price
+            Polymarket CLOB 报价的 YES 方向价格（全局统一为 YES）。
+            → 本方法不直接用于信号判断；只用 pos.current_price 做价格判断。
+              mkt.price 仅用于 market_index 查找和 AI enrich 传参。
         """
         cfg     = self.cfg
         outcome = pos.outcome.strip().upper()    # "YES" or "NO"
         is_yes  = outcome == "YES"
 
-        # ── 方向对齐：提取持仓方向的当前价格和 AI 胜率 ──────────────
-        # position_price：持仓方向的当前市价，与 avg_price 同一坐标系
-        # position_prob ：持仓方向的 AI 胜率，与 avg_price 同一坐标系
-        position_price: float = mkt.price       if is_yes else (1.0 - mkt.price)
-        position_prob:  float = mkt.true_prob   if is_yes else (1.0 - mkt.true_prob)
+        # ── 价格：直接使用 API 返回的持仓方向当前价，不做翻转 ────────
+        # pos.current_price 已经是该持仓方向（YES 或 NO）的真实市价
+        position_price: float = pos.current_price
+
+        # ── AI 胜率：mkt.true_prob 是 YES 方向，NO 仓需翻转 ─────────
+        position_prob: float = mkt.true_prob if is_yes else (1.0 - mkt.true_prob)
 
         avg_price = pos.avg_price
         days_left = mkt.days_to_expiry

@@ -345,16 +345,17 @@ def main() -> None:
             print(f"[ERROR] {exc}")
             sys.exit(1)
 
-    # ── 5. AI 增强（新机会部分，Phase 1）─────────────────────────────────
-    if oracle is not None:
-        markets = oracle.enrich_all(markets, ai_top_n=args.ai_top_n)
-        logger.info("AI Oracle 增强完成（新机会）")
-
-    # ── 6. Phase 1：新机会扫描 ────────────────────────────────────────────
+    # ── 5. Phase 1：新机会扫描 ────────────────────────────────────────────
+    # --no-scan 拦截必须在 AI enrich 之前：跳过扫描时绝不对非持仓市场调用 AI
     scan_report   = None
     held_markets: list = []
 
     if not args.no_scan:
+        # 只有正常扫描模式才对新机会市场做 AI 增强
+        if oracle is not None:
+            markets = oracle.enrich_all(markets, ai_top_n=args.ai_top_n)
+            logger.info("AI Oracle 增强完成（新机会）")
+
         scanner = MarketScanner(
             cfg             = cfg,
             data_source     = lambda: markets,
@@ -362,12 +363,13 @@ def main() -> None:
         )
         scan_report, held_markets = scanner.run()
     else:
-        # no_scan 模式：仍需分离已持仓市场供 Phase 2 使用
-        held_index    = {p.market_id for p in positions}
-        held_markets  = [m for m in markets if m.market_id in held_index]
-        logger.info("--no-scan: 跳过 Phase 1 新机会扫描。")
+        # --no-scan：完全跳过新机会 AI 增强和策略扫描
+        # 仍需从全量市场中分离出已持仓市场，供 Phase 2 监控使用
+        held_index   = {p.market_id for p in positions}
+        held_markets = [m for m in markets if m.market_id in held_index]
+        logger.info("--no-scan: 跳过 Phase 1 新机会 AI 增强和扫描。")
 
-    # ── 7. Phase 2a：持仓动态监控 ────────────────────────────────────────
+    # ── 6. Phase 2a：持仓动态监控 ────────────────────────────────────────
     monitor_report = None
     if args.monitor:
         from polymarket_scanner.position_monitor import PositionMonitor
@@ -382,7 +384,7 @@ def main() -> None:
                 oracle       = oracle,  # None → 用原始市价；有 oracle → AI 增强
             )
 
-    # ── 8. Phase 2b：跨平台套利扫描 ─────────────────────────────────────
+    # ── 7. Phase 2b：跨平台套利扫描 ─────────────────────────────────────
     arb_report = None
     if args.arb:
         from polymarket_scanner.arbitrage_scanner import ArbitrageScanner
@@ -396,7 +398,7 @@ def main() -> None:
         )
         arb_report = arb_scanner.scan(markets)
 
-    # ── 9. 输出所有报告 ───────────────────────────────────────────────────
+    # ── 8. 输出所有报告 ───────────────────────────────────────────────────
     separator = "\n" + "═" * 60 + "\n"
 
     if using_mock:
