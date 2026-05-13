@@ -127,3 +127,146 @@ def format_report(report: ScanReport) -> str:
 
     lines.append(_DIVIDER)
     return "\n".join(lines)
+
+
+
+# =============================================================================
+# Phase 2 — Position Monitor formatter
+# =============================================================================
+
+from .models import MonitorReport, PositionSignal   # noqa: E402 (append context)
+
+_SIGNAL_EMOJI = {
+    "TAKE_PROFIT":  "💰",
+    "STOP_LOSS":    "🛑",
+    "ADD_POSITION": "➕",
+    "WATCH":        "👀",
+    "HOLD":         "🔒",
+}
+_URGENCY_LABEL = {"HIGH": "⚡ 紧急", "MEDIUM": "⚠ 关注", "LOW": "ℹ 信息"}
+
+
+def _fmt_signal(sig: PositionSignal) -> str:
+    pos  = sig.position
+    mkt  = sig.market
+    emoji = _SIGNAL_EMOJI.get(sig.signal_type, "•")
+    urg   = _URGENCY_LABEL.get(sig.urgency, sig.urgency)
+
+    pnl_sign = "+" if pos.unrealized_pnl >= 0 else ""
+    lines = [
+        f"  {emoji} [{sig.signal_type}]  {urg}",
+        f"     市场: {mkt.question[:70]}",
+        f"     ID:   {pos.market_id}",
+        f"     方向: {pos.outcome}  份额: {pos.size:.2f}  均价: {pos.avg_price:.3f}",
+        f"     现价: {mkt.price:.3f}  AI胜率: {mkt.true_prob:.3f}  "
+        f"浮盈: ${pnl_sign}{pos.unrealized_pnl:.2f}",
+    ]
+    # 只显示前 3 条 rationale（第一条是摘要行，后面是原因）
+    for note in sig.rationale[1:4]:
+        lines.append(f"     → {note}")
+    return "\n".join(lines)
+
+
+def format_monitor_report(report: MonitorReport) -> str:
+    """将 MonitorReport 格式化为可读的控制台字符串。"""
+    lines: list[str] = []
+    W = 60
+
+    lines += [
+        "─" * W,
+        "  📊  持仓动态监控报告  (Phase 2)",
+        "─" * W,
+        f"  检查持仓: {report.positions_checked} 个  |  "
+        f"AI 增强: {report.ai_enriched} 个",
+        "",
+    ]
+
+    actionable = report.actionable
+    if actionable:
+        lines.append(f"  ⚡ 需要操作的信号（共 {len(actionable)} 条）：")
+        lines.append("")
+        for sig in sorted(actionable, key=lambda s: ("HIGH", "MEDIUM", "LOW").index(s.urgency)):
+            lines.append(_fmt_signal(sig))
+            lines.append("")
+    else:
+        lines.append("  ✅ 所有持仓状态正常，无需操作。")
+        lines.append("")
+
+    # 非操作性信号（WATCH / HOLD）折叠展示
+    passive = [s for s in report.signals if not s.is_actionable]
+    if passive:
+        lines.append(f"  观察 / 持有（{len(passive)} 条）：")
+        for sig in passive:
+            emoji = _SIGNAL_EMOJI.get(sig.signal_type, "•")
+            pos   = sig.position
+            mkt   = sig.market
+            pnl_s = f"+{pos.unrealized_pnl:.2f}" if pos.unrealized_pnl >= 0 \
+                    else f"{pos.unrealized_pnl:.2f}"
+            lines.append(
+                f"    {emoji} {sig.signal_type:<12} "
+                f"{mkt.question[:45]:<47} "
+                f"AI={mkt.true_prob:.2f}  PnL=${pnl_s}"
+            )
+        lines.append("")
+
+    lines.append("─" * W)
+    return "\n".join(lines)
+
+
+# =============================================================================
+# Phase 2 — Arbitrage Scanner formatter
+# =============================================================================
+
+from .models import ArbitrageReport, ArbitrageOpportunity   # noqa: E402
+
+
+def _fmt_arb_opp(opp: ArbitrageOpportunity, rank: int) -> str:
+    pm  = opp.pm_market
+    kal = opp.kalshi_market
+    confidence_bar = "█" * int(opp.match_confidence * 10) + "░" * (10 - int(opp.match_confidence * 10))
+
+    lines = [
+        f"  #{rank}  套利空间: {opp.arb_gap:+.4f}  "
+        f"预期收益: {opp.expected_profit_pct:.1%}  "
+        f"匹配置信度: {opp.match_confidence:.0%} [{confidence_bar}]  "
+        f"方法: {opp.match_method}",
+        f"     PM    [{opp.pm_side}]: {pm.question[:65]}",
+        f"            价格={pm.price:.3f}  流动性=${pm.liquidity:,.0f}",
+        f"     Kalshi[{opp.kalshi_side}]: {kal.question[:65]}",
+        f"            价格={kal.yes_price:.3f}/{kal.no_price:.3f}  "
+        f"OI=${kal.open_interest:,.0f}",
+        f"     操作: {opp.recommended_action}",
+    ]
+    for note in opp.rationale[:3]:
+        lines.append(f"     • {note}")
+    return "\n".join(lines)
+
+
+def format_arb_report(report: ArbitrageReport) -> str:
+    """将 ArbitrageReport 格式化为可读的控制台字符串。"""
+    lines: list[str] = []
+    W = 60
+
+    lines += [
+        "─" * W,
+        "  ⚡  Polymarket × Kalshi 跨平台套利报告  (Phase 2)",
+        "─" * W,
+        f"  PM 市场: {report.pm_markets_checked} 个  |  "
+        f"Kalshi 市场: {report.kalshi_markets_fetched} 个  |  "
+        f"候选对: {report.candidate_pairs} 个  |  "
+        f"AI 验证: {report.ai_verified_pairs} 对",
+        "",
+    ]
+
+    if report.opportunities:
+        lines.append(f"  发现 {len(report.opportunities)} 个套利机会（按利润空间降序）：")
+        lines.append("")
+        for i, opp in enumerate(report.opportunities, 1):
+            lines.append(_fmt_arb_opp(opp, i))
+            lines.append("")
+    else:
+        lines.append("  当前无满足阈值的跨平台套利机会。")
+        lines.append("")
+
+    lines.append("─" * W)
+    return "\n".join(lines)

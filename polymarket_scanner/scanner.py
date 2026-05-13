@@ -83,27 +83,53 @@ class MarketScanner:
     # ------------------------------------------------------------------
     # 持仓过滤（核心去重逻辑）
     # ------------------------------------------------------------------
-    def _filter_held(self, markets: List[Market]) -> tuple[List[Market], int]:
-        """从候选列表中移除已持仓市场，返回 (过滤后列表, 跳过数量)。"""
+    def _filter_held(
+        self, markets: List[Market]
+    ) -> tuple[List[Market], List[Market], int]:
+        """从候选列表中分离已持仓市场。
+
+        Returns
+        -------
+        (new_markets, held_markets, skipped_count)
+        new_markets  : 不在持仓中的市场，送入策略扫描
+        held_markets : 已持仓市场列表，送入 PositionMonitor（Phase 2）
+        skipped_count: 持仓市场数量（用于 ScanReport 统计）
+        """
         if not self.held_market_ids:
-            return markets, 0
-        filtered = [m for m in markets if m.market_id not in self.held_market_ids]
-        skipped  = len(markets) - len(filtered)
+            return markets, [], 0
+
+        new_markets:  List[Market] = []
+        held_markets: List[Market] = []
+        for m in markets:
+            if m.market_id in self.held_market_ids:
+                held_markets.append(m)
+            else:
+                new_markets.append(m)
+
+        skipped = len(held_markets)
         if skipped:
             import logging
             logging.getLogger(__name__).info(
-                "🚫 已过滤 %d 个已持仓市场，避免重复推送。", skipped
+                "🚫 已分离 %d 个持仓市场（新机会扫描跳过，送入持仓监控）。", skipped
             )
-        return filtered, skipped
+        return new_markets, held_markets, skipped
 
     # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
-    def run(self) -> ScanReport:
+    def run(self) -> tuple["ScanReport", List[Market]]:
+        """执行市场扫描。
+
+        Returns
+        -------
+        (ScanReport, held_markets)
+        ScanReport   : 新机会的策略评估结果（与 Phase 1 完全兼容）
+        held_markets : 已持仓市场列表，供 PositionMonitor 使用（Phase 2）
+        """
         all_markets = self.fetch_markets()
 
-        # ── 持仓去重过滤 ──────────────────────────────────────────────
-        markets, skipped = self._filter_held(all_markets)
+        # ── 持仓分流 ─────────────────────────────────────────────────
+        markets, held_markets, skipped = self._filter_held(all_markets)
 
         report = ScanReport(
             total_markets_scanned = len(all_markets),
@@ -131,4 +157,4 @@ class MarketScanner:
             else:
                 report.volatility_rejected.append((opp, decision))
 
-        return report
+        return report, held_markets
