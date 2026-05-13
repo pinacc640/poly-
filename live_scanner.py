@@ -245,6 +245,8 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="DeepSeek 最大 token 数（默认 256）")
     ai.add_argument("--no-fallback",  action="store_true", default=False,
                     help="AI 出错时抛异常（默认静默保留原概率）")
+    ai.add_argument("--ai-top-n",     type=int,   default=10, dest="ai_top_n",
+                    help="AI 深度分析的市场数量上限，按流动性 Top-N 截断（默认 10）")
     return p
 
 
@@ -329,7 +331,7 @@ def main() -> None:
             print(f"[ERROR] {exc}")
             sys.exit(1)
 
-        markets = oracle.enrich_all(markets)
+        markets = oracle.enrich_all(markets, ai_top_n=args.ai_top_n)
         logger.info("AI Oracle 增强完成")
 
     # ── 5. 运行扫描器（含持仓去重）───────────────────────────────────────────

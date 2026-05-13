@@ -355,13 +355,105 @@ class AIOracle:
                 return market
             raise
 
-    def enrich_all(self, markets: List[Market]) -> List[Market]:
-        """Enrich an entire list of markets, returning enriched copies.
+    def enrich_all(
+        self,
+        markets: List[Market],
+        ai_top_n: int = 10,
+        ai_min_liquidity: float = 100_000.0,
+        ai_price_low: float = 0.10,
+        ai_price_high: float = 0.90,
+    ) -> List[Market]:
+        """Enrich a list of markets with AI-estimated probabilities.
 
-        Markets that fail enrichment are returned with their original
-        true_prob (when fallback_on_error=True).
+        Two-stage pipeline
+        ------------------
+        Stage 1 — Basic pre-filter
+            Keep only markets that clear the minimum bars worth sending to
+            a paid AI API:
+              • liquidity  >= ai_min_liquidity  (default $100 000)
+              • price in   (ai_price_low, ai_price_high)  (default 0.10–0.90)
+                Extreme prices already have near-certain probabilities and
+                produce negligible EV improvements from AI correction.
+
+        Stage 2 — Hard Top-N cap
+            Sort the pre-filtered candidates by liquidity DESC (most liquid
+            markets have the tightest true-price signals and the most
+            tradeable outcomes), then keep only the top ``ai_top_n``
+            (default 10) for AI deep-analysis.
+
+        Bypass markets
+            • Markets that fail the basic pre-filter, AND
+            • Markets that passed the pre-filter but ranked below Top-N
+            …are returned unchanged with their original ``true_prob``.
+            They are *not* discarded — the scanner still considers them
+            with the raw market-implied probability.
+
+        Parameters
+        ----------
+        markets :
+            Full list of Market objects (all active markets fetched from
+            Gamma API or mock data).
+        ai_top_n :
+            Hard cap on AI calls per run (default 10).
+        ai_min_liquidity :
+            Minimum USD liquidity for a market to be considered for AI
+            enrichment (default $100 000).
+        ai_price_low / ai_price_high :
+            Price window outside which markets are considered too extreme
+            for meaningful AI correction (default 0.10–0.90).
         """
-        enriched = []
+        # ── Stage 1: basic pre-filter ────────────────────────────────────
+        ai_candidates: List[Market] = []
+        bypass:        List[Market] = []
+
         for m in markets:
-            enriched.append(self.enrich(m))
-        return enriched
+            if (
+                m.liquidity >= ai_min_liquidity
+                and ai_price_low < m.price < ai_price_high
+            ):
+                ai_candidates.append(m)
+            else:
+                bypass.append(m)
+
+        n_basic = len(ai_candidates)
+
+        # ── Stage 2: sort by liquidity DESC + hard Top-N cut ─────────────
+        ai_candidates.sort(key=lambda m: m.liquidity, reverse=True)
+
+        top_n      = ai_candidates[:ai_top_n]       # will call AI
+        tail       = ai_candidates[ai_top_n:]        # skip AI, keep raw prob
+
+        n_ai_calls = len(top_n)
+        n_skipped  = len(bypass) + len(tail)
+
+        logger.info(
+            "AI 前置过滤：%d 个符合基础条件（流动性 >= $%.0f，价格 %.0f%%–%.0f%%），"
+            "已截取流动性 Top %d 进入 AI 深度分析，其余 %d 个直接使用原始概率。",
+            n_basic,
+            ai_min_liquidity,
+            ai_price_low * 100,
+            ai_price_high * 100,
+            n_ai_calls,
+            n_skipped,
+        )
+
+        if n_basic > ai_top_n:
+            logger.info(
+                "  → Top %d 流动性范围：$%.0f – $%.0f",
+                n_ai_calls,
+                top_n[-1].liquidity if top_n else 0,
+                top_n[0].liquidity  if top_n else 0,
+            )
+
+        # ── AI enrichment (only Top-N) ────────────────────────────────────
+        enriched_top: List[Market] = []
+        for m in top_n:
+            enriched_top.append(self.enrich(m))
+
+        # ── Reassemble: preserve original market order ────────────────────
+        enriched_index = {m.market_id: m for m in enriched_top}
+        result: List[Market] = []
+        for m in markets:
+            result.append(enriched_index.get(m.market_id, m))
+
+        return result
