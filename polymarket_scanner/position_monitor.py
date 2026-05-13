@@ -3,28 +3,40 @@
 对已持仓市场进行 AI 增强评估，根据最新胜率和当前价格生成
 止盈 / 止损 / 加仓 / 观察 信号。
 
+方向对齐原则（核心设计）
+─────────────────────────
+market.price     和 market.true_prob 永远表示 YES 方向的数值。
+持仓均价 avg_price 也永远是买入时该方向的价格。
+
+因此：
+  YES 仓：position_price = market.price       position_prob = market.true_prob
+  NO  仓：position_price = 1 - market.price   position_prob = 1 - market.true_prob
+
+所有信号判断统一使用 position_price / position_prob，
+保证与 avg_price 处于同一坐标系，不会出现方向混乱。
+
 信号触发逻辑（按优先级排列）
 ─────────────────────────────
 TAKE_PROFIT（止盈，优先级最高）
-  条件 A：current_price >= monitor_tp_abs_price（默认 0.90）
-          价格已进入极高概率区间，边际收益极低，落袋为安
-  条件 B：current_price >= avg_price + monitor_tp_delta（默认 +0.20）
+  条件 A：position_price >= monitor_tp_abs_price（默认 0.90）
+          持仓方向价格已进入极高概率区间，落袋为安
+  条件 B：position_price >= avg_price + monitor_tp_delta（默认 +0.20）
           相对均价已盈利 20 个价格点
   条件 C：days_to_expiry <= monitor_tp_expiry_days（默认 2 天）且 unrealized_pnl > 0
-          临近结算且浮盈，不值得继续持有风险
+          临近结算且浮盈
 
 STOP_LOSS（止损 / AI 胜率反转，优先级第二）
-  若持 YES 仓：true_prob < avg_price - monitor_sl_ai_reversal（默认 -0.15）
-  若持 NO  仓：(1 - true_prob) < avg_price - monitor_sl_ai_reversal
+  position_prob < avg_price - monitor_sl_ai_reversal（默认 -0.15）
+  即：AI 对持仓方向的估计胜率，相对于买入均价下修超过 0.15
   含义：AI 认为基本面已显著逆转，建议出清
 
 ADD_POSITION（加仓，全部满足才触发）
-  A. current_price <= avg_price * monitor_add_discount（默认 0.85，即回落 ≥ 15%）
-  B. AI 仍看好（方向正确且 edge >= monitor_add_ai_edge，默认 +0.10）
+  A. position_price <= avg_price * monitor_add_discount（默认 0.85，即回落 ≥ 15%）
+  B. position_prob  >= avg_price + monitor_add_ai_edge（默认 +0.10，AI 仍看好）
   C. days_to_expiry >= monitor_add_min_days（默认 3 天）
   D. liquidity >= monitor_add_min_liquidity（默认 $50 000）
 
-WATCH（观察）：价格轻微偏离但尚未达到任何阈值
+WATCH（观察）：满足 ≥ 2 个加仓条件但未全部达标
 HOLD（持仓无需操作）：一切正常
 
 用法
@@ -155,34 +167,59 @@ class PositionMonitor:
     # ------------------------------------------------------------------
 
     def _evaluate(self, pos: Position, mkt: Market) -> PositionSignal:
-        """对单条持仓评估，返回 PositionSignal。"""
-        cfg      = self.cfg
-        outcome  = pos.outcome.upper()          # "YES" or "NO"
-        is_yes   = outcome in {"YES", "YES "}
+        """对单条持仓评估，返回 PositionSignal。
 
-        cur_price  = mkt.price                  # 最新市场价
-        true_prob  = mkt.true_prob              # AI 估计胜率
-        avg_price  = pos.avg_price
-        days_left  = mkt.days_to_expiry
-        liquidity  = mkt.liquidity
-        pnl        = pos.unrealized_pnl
+        方向对齐规则
+        ──────────────
+        mkt.price     永远是 YES 的市场价格（0..1）
+        mkt.true_prob 永远是 YES 的 AI 胜率估计（0..1）
 
-        rationale: list[str] = []
-        rationale.append(
-            f"均价={avg_price:.3f}  现价={cur_price:.3f}  "
-            f"AI胜率={true_prob:.3f}  剩余{days_left}天"
-        )
+        持仓如果是 NO 方向，需要将两者翻转，才能与持仓均价（avg_price）
+        在同一坐标系下比较：
+            position_price = 1 - mkt.price       （NO 方向的当前市价）
+            position_prob  = 1 - mkt.true_prob   （NO 方向的 AI 胜率）
+
+        所有止盈、止损、加仓判断统一使用 position_price / position_prob，
+        不再直接使用 mkt.price / mkt.true_prob，彻底消除方向混乱。
+        """
+        cfg     = self.cfg
+        outcome = pos.outcome.strip().upper()    # "YES" or "NO"
+        is_yes  = outcome == "YES"
+
+        # ── 方向对齐：提取持仓方向的当前价格和 AI 胜率 ──────────────
+        # position_price：持仓方向的当前市价，与 avg_price 同一坐标系
+        # position_prob ：持仓方向的 AI 胜率，与 avg_price 同一坐标系
+        position_price: float = mkt.price       if is_yes else (1.0 - mkt.price)
+        position_prob:  float = mkt.true_prob   if is_yes else (1.0 - mkt.true_prob)
+
+        avg_price = pos.avg_price
+        days_left = mkt.days_to_expiry
+        liquidity = mkt.liquidity
+        pnl       = pos.unrealized_pnl
+
+        direction_label = "YES" if is_yes else "NO"
+
+        # 摘要行：所有数值均为持仓方向视角
+        rationale: list[str] = [
+            f"方向={direction_label}  均价={avg_price:.3f}  "
+            f"现价({direction_label})={position_price:.3f}  "
+            f"AI胜率({direction_label})={position_prob:.3f}  "
+            f"剩余{days_left}天"
+        ]
 
         # ── 1. 止盈检查 ───────────────────────────────────────────────
+        # 统一使用 position_price（已对齐持仓方向），与 avg_price 直接比较
         tp_reasons: list[str] = []
 
-        if cur_price >= cfg.monitor_tp_abs_price:
+        if position_price >= cfg.monitor_tp_abs_price:
             tp_reasons.append(
-                f"价格 {cur_price:.3f} ≥ 绝对高位 {cfg.monitor_tp_abs_price:.2f}"
+                f"{direction_label}价格 {position_price:.3f} ≥ "
+                f"绝对高位 {cfg.monitor_tp_abs_price:.2f}"
             )
-        if cur_price >= avg_price + cfg.monitor_tp_delta:
+        if position_price >= avg_price + cfg.monitor_tp_delta:
             tp_reasons.append(
-                f"盈利 {cur_price - avg_price:+.3f} ≥ 阈值 +{cfg.monitor_tp_delta:.2f}"
+                f"盈利 {position_price - avg_price:+.3f} ≥ "
+                f"阈值 +{cfg.monitor_tp_delta:.2f}（均价 {avg_price:.3f} → 现价 {position_price:.3f}）"
             )
         if days_left <= cfg.monitor_tp_expiry_days and pnl > 0:
             tp_reasons.append(
@@ -190,7 +227,7 @@ class PositionMonitor:
             )
 
         if tp_reasons:
-            urgency = "HIGH" if cur_price >= cfg.monitor_tp_abs_price else "MEDIUM"
+            urgency = "HIGH" if position_price >= cfg.monitor_tp_abs_price else "MEDIUM"
             return PositionSignal(
                 signal_type = "TAKE_PROFIT",
                 position    = pos,
@@ -199,14 +236,13 @@ class PositionMonitor:
                 urgency     = urgency,
             )
 
-        # ── 2. 止损 / AI 反转检查 ─────────────────────────────────────
-        # 判断方向：YES 仓看 true_prob；NO 仓看 1 - true_prob
-        effective_prob = true_prob if is_yes else (1.0 - true_prob)
-        sl_threshold   = avg_price - cfg.monitor_sl_ai_reversal
+        # ── 2. 止损 / AI 胜率反转检查 ────────────────────────────────
+        # position_prob 已是持仓方向的 AI 胜率，直接与 avg_price 比较
+        sl_threshold = avg_price - cfg.monitor_sl_ai_reversal
 
-        if effective_prob < sl_threshold:
+        if position_prob < sl_threshold:
             sl_reason = (
-                f"AI {'胜率' if is_yes else '败率'} {effective_prob:.3f} < "
+                f"AI {direction_label}胜率 {position_prob:.3f} < "
                 f"均价 {avg_price:.3f} - {cfg.monitor_sl_ai_reversal:.2f} "
                 f"= {sl_threshold:.3f}，基本面可能反转"
             )
@@ -219,16 +255,19 @@ class PositionMonitor:
             )
 
         # ── 3. 加仓检查（全部条件须同时满足）─────────────────────────
+        # 条件 A：持仓方向的当前价格相对均价回落 ≥ 15%
+        # 条件 B：持仓方向的 AI 胜率仍高于均价 + edge（AI 依旧看好）
         add_checks: list[tuple[bool, str]] = [
             (
-                cur_price <= avg_price * cfg.monitor_add_discount,
-                f"现价 {cur_price:.3f} ≤ 均价 {avg_price:.3f} × {cfg.monitor_add_discount:.2f} "
+                position_price <= avg_price * cfg.monitor_add_discount,
+                f"{direction_label}现价 {position_price:.3f} ≤ "
+                f"均价 {avg_price:.3f} × {cfg.monitor_add_discount:.2f} "
                 f"= {avg_price * cfg.monitor_add_discount:.3f}（已回落 ≥ 15%）",
             ),
             (
-                effective_prob >= avg_price + cfg.monitor_add_ai_edge,
-                f"AI方向概率 {effective_prob:.3f} ≥ 均价+edge "
-                f"{avg_price + cfg.monitor_add_ai_edge:.3f}（AI仍看好）",
+                position_prob >= avg_price + cfg.monitor_add_ai_edge,
+                f"AI {direction_label}胜率 {position_prob:.3f} ≥ "
+                f"均价+edge {avg_price + cfg.monitor_add_ai_edge:.3f}（AI仍看好）",
             ),
             (
                 days_left >= cfg.monitor_add_min_days,
@@ -240,8 +279,8 @@ class PositionMonitor:
             ),
         ]
 
-        all_pass  = all(ok for ok, _ in add_checks)
-        add_notes = [note for ok, note in add_checks if ok]
+        all_pass   = all(ok for ok, _ in add_checks)
+        add_notes  = [note for ok, note in add_checks if ok]
         fail_notes = [note for ok, note in add_checks if not ok]
 
         if all_pass:
