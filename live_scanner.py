@@ -188,6 +188,18 @@ def main() -> None:
         stable_max_days_to_expiry = args.max_days,
     )
 
+    # ── Phase 4: on-chain portfolio sync ────────────────────────────────────
+    # Syncs wallet positions to portfolio.json BEFORE the scan so we can
+    # split markets into "fresh" (no position) vs "held" (already in).
+    from polymarket_scanner.portfolio_sync import sync_portfolio, load_portfolio
+    try:
+        portfolio = sync_portfolio()
+        log.info("📊 Portfolio sync: %d active position(s)", len(portfolio))
+    except Exception as _sync_exc:
+        log.warning("Portfolio sync failed (%s) — using local cache if available", _sync_exc)
+        portfolio = load_portfolio()
+    held_market_ids = set(portfolio.keys())
+
     # --- Gamma health check ---
     client = GammaClient()
     log.info("Checking Gamma API connectivity …")
@@ -231,6 +243,15 @@ def main() -> None:
         return
 
     # --- Full scan ---
+    # Split: fresh markets (no position) go through EV/Kelly scan;
+    # held markets go to the position monitor at the end.
+    all_markets   = data_source()
+    fresh_markets = [m for m in all_markets if m.market_id not in held_market_ids]
+    held_markets  = [m for m in all_markets if m.market_id     in held_market_ids]
+    log.info(
+        "Market split: %d fresh (will scan) | %d held (will monitor)",
+        len(fresh_markets), len(held_markets),
+    )
     flags = []
     if args.use_ai:    flags.append("AI-oracle")
     if args.arbitrage: flags.append("arbitrage")
@@ -247,7 +268,7 @@ def main() -> None:
 
     scanner = MarketScanner(
         cfg           = cfg,
-        data_source   = data_source,
+        data_source   = lambda: fresh_markets,
         use_ai        = args.use_ai,
         run_arbitrage = args.arbitrage,
     )
@@ -321,6 +342,32 @@ def main() -> None:
                 log.info("📱 Telegram: all opportunities already pushed within 24h, skipping")
         else:
             log.info("📱 Telegram: no approved trade opportunities, skipping push")
+
+    # ── Phase 4: position risk monitor ───────────────────────────────────────
+    # Checks every held position (TP / SL / Avg-Down) against live prices.
+    if portfolio:
+        from polymarket_scanner.position_monitor import PositionMonitor
+        monitor    = PositionMonitor()
+        pos_alerts = monitor.check(portfolio, all_markets)   # use ALL markets for price lookup
+
+        if pos_alerts:
+            log.info("📊 Position monitor: %d alert(s) triggered", len(pos_alerts))
+            if notifier.is_enabled():
+                sent = sum(1 for msg in pos_alerts if notifier._post(msg))
+                log.info("📱 Telegram (position alerts): sent %d/%d", sent, len(pos_alerts))
+            else:
+                # No Telegram configured — print to terminal
+                import re as _re
+                print("\n" + "═" * 65)
+                print("  📊 POSITION RISK ALERTS")
+                print("═" * 65)
+                for msg in pos_alerts:
+                    print(_re.sub(r"<[^>]+>", "", msg))   # strip HTML tags
+                    print()
+        else:
+            log.info("📊 Position monitor: all %d position(s) within normal range", len(portfolio))
+    else:
+        log.debug("Position monitor skipped — no active positions")
 
     sys.exit(0)
 
