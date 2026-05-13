@@ -31,7 +31,7 @@ log = logging.getLogger(__name__)
 GAMMA_BASE_URL = "https://gamma-api.polymarket.com"
 
 # How many markets to pull per HTTP request (Gamma max observed = 500)
-_PAGE_SIZE = 100
+_PAGE_SIZE = 200
 
 # Seconds to wait between paginated pages — keeps us comfortably under
 # the 100 req/s limit even when fetching many pages.
@@ -42,7 +42,7 @@ _INTER_PAGE_SLEEP = 0.25
 _BACKOFF_BASE = 1.0
 
 # Total pages cap — prevents infinite loops on misconfigured calls.
-_MAX_PAGES = 20
+_MAX_PAGES = 50
 
 
 # ---------------------------------------------------------------------------

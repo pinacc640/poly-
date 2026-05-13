@@ -109,7 +109,7 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Polymarket live scanner — stable + vol + smart-money + arbitrage",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--limit", type=int, default=200, metavar="N",
+    p.add_argument("--limit", type=int, default=1000, metavar="N",
                    help="Max markets to fetch from Gamma API")
     p.add_argument("--capital", type=float, default=50.0, metavar="USD",
                    help="Total account capital in USD")
@@ -264,22 +264,63 @@ def main() -> None:
     if total_approved == 0:
         log.info("No approved opportunities found this scan.")
 
-    # ── Telegram push (Phase 3) ──────────────────────────────────────────────
+    # ── Telegram push (with dedup + fundamentals check) ─────────────────────
     # Reads TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID from environment.
     # Silently skips if either variable is not set.
     from polymarket_scanner.notifier import TelegramNotifier
+    from polymarket_scanner.dedup import PushDedup
+    from polymarket_scanner.fundamentals import FundamentalsChecker
+
     notifier = TelegramNotifier()
     if notifier.is_enabled():
-        tradeable = (
-            len(report.stable_approved)
-            + len(report.volatility_approved)
-            + len(report.smart_money_approved)
+        # Collect all approved opportunities
+        all_approved = (
+            report.stable_approved
+            + report.volatility_approved
+            + report.smart_money_approved
         )
-        if tradeable > 0:
-            sent = notifier.send_report(report)
-            log.info("📱 Telegram: sent %d message(s)", sent)
+
+        if all_approved:
+            # Step A: Dedup — filter out markets already pushed in the last 24h
+            dedup = PushDedup()
+            new_opps = dedup.filter_new(all_approved)
+            log.info("📋 Dedup: %d total → %d new (skipped %d already pushed)",
+                     len(all_approved), len(new_opps), len(all_approved) - len(new_opps))
+
+            if new_opps:
+                # Step B: Fundamentals check — DeepSeek sanity filter on new opps
+                checker = FundamentalsChecker()
+                if checker.is_available():
+                    verified_opps = checker.check_opportunities(new_opps)
+                    log.info("🔍 Fundamentals: %d/%d passed DeepSeek sanity check",
+                             len(verified_opps), len(new_opps))
+                else:
+                    verified_opps = new_opps
+                    log.debug("Fundamentals check skipped (DEEPSEEK_API_KEY not set)")
+
+                # Step C: Send Telegram alerts for verified opportunities
+                if verified_opps:
+                    # Rebuild a mini-report with only the verified opps for the notifier
+                    from polymarket_scanner.scanner import ScanReport
+                    push_report = ScanReport(
+                        stable_approved=[x for x in verified_opps if x in report.stable_approved],
+                        volatility_approved=[x for x in verified_opps if x in report.volatility_approved],
+                        smart_money_approved=[x for x in verified_opps if x in report.smart_money_approved],
+                        total_markets_scanned=report.total_markets_scanned,
+                        config=report.config,
+                        ai_oracle_used=report.ai_oracle_used,
+                    )
+                    sent = notifier.send_report(push_report)
+                    log.info("📱 Telegram: sent %d message(s)", sent)
+
+                    # Step D: Mark pushed so next run won't re-alert
+                    dedup.mark_pushed(verified_opps)
+                else:
+                    log.info("📱 Telegram: all new opps failed fundamentals check, no push")
+            else:
+                log.info("📱 Telegram: all opportunities already pushed within 24h, skipping")
         else:
-            log.info("📱 Telegram: no trade opportunities, skipping push")
+            log.info("📱 Telegram: no approved trade opportunities, skipping push")
 
     sys.exit(0)
 
