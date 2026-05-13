@@ -234,7 +234,14 @@ def _parse_response(text: str) -> Tuple[Optional[float], str]:
 # Prompt builder
 # ---------------------------------------------------------------------------
 def _build_messages(market: Market, news_context: str) -> List[dict]:
+    from datetime import date
+    today = date.today().isoformat()   # e.g. "2026-05-13"
+
     system_prompt = (
+        f"Today's date is {today}. "
+        "Use this date as your reference when assessing whether events have already "
+        "occurred, whether deadlines have passed, or when reasoning about future outcomes. "
+        "Do NOT assume any other date.\n\n"
         "You are a probability calibration expert for prediction markets. "
         "Your task is to estimate the true probability of a binary market outcome "
         "resolving YES.\n\n"

@@ -48,23 +48,59 @@ class FundamentalsVerdict:
     market_id: str          # Which market was checked
 
 
-def _build_prompt(question: str, price: float, ai_prob: float) -> str:
-    """Build a focused prompt for DeepSeek fundamentals check."""
+def _build_prompt(question: str, price: float, ai_prob: float, side: str = "YES") -> str:
+    """Build a focused prompt for DeepSeek fundamentals check.
+
+    Parameters
+    ----------
+    side : "YES" or "NO"
+        The trade direction proposed by the scanner.
+        "NO" means we are shorting the market (buying the NO token),
+        betting that the market price is inflated by irrational hype.
+    """
+    edge_pct = (ai_prob - price) * 100
+    if side == "NO":
+        # Buying NO: our AI thinks the true probability is LOWER than market price.
+        # The "edge" is negative (price > ai_prob); express it as the overpricing.
+        trade_desc = (
+            f"Proposed trade: BUY NO (short the market)\n"
+            f"The scanner believes the market is OVERPRICED by {abs(edge_pct):.1f} "
+            f"percentage points ({price:.1%} market vs {ai_prob:.1%} AI estimate).\n"
+            f"This is a SHORT trade — we profit if the market price falls."
+        )
+    else:
+        trade_desc = (
+            f"Proposed trade: BUY YES (long the market)\n"
+            f"The scanner believes the market is UNDERPRICED by {abs(edge_pct):.1f} "
+            f"percentage points ({price:.1%} market vs {ai_prob:.1%} AI estimate).\n"
+            f"This is a LONG trade — we profit if the market price rises."
+        )
+
     return (
-        f"You are a risk analyst for prediction markets. "
-        f"A scanner flagged this market as a potential trade opportunity.\n\n"
         f"Market: \"{question}\"\n"
         f"Current price (implied probability): {price:.1%}\n"
         f"AI-estimated true probability: {ai_prob:.1%}\n"
-        f"Perceived edge: {(ai_prob - price)*100:+.1f} percentage points\n\n"
-        f"Please do a quick sanity check:\n"
-        f"1. Is there any widely-known news that explains why this price is correct "
-        f"(i.e., the 'edge' is actually a trap)?\n"
-        f"2. Has this event already effectively resolved but not yet settled on-chain?\n"
-        f"3. Are there any red flags (ambiguous resolution criteria, disputed outcome, etc.)?\n\n"
+        f"{trade_desc}\n\n"
+        f"IMPORTANT RULES for your verdict:\n\n"
+        f"Return FAIL ONLY if one of these two hard conditions is true:\n"
+        f"  1. INSIDER TRAP: There is concrete, specific, undiscounted information "
+        f"(e.g., a confirmed player injury, a privately announced withdrawal) that "
+        f"fully explains the price and eliminates the edge.\n"
+        f"  2. RESOLUTION AMBIGUITY: The market resolution criteria are genuinely "
+        f"disputed, unclear, or subject to contradictory official interpretations.\n\n"
+        f"Return PASS in ALL other cases, including:\n"
+        f"  - The price is high due to irrational public enthusiasm, hype, or fake news "
+        f"(for NO trades, this IS the opportunity — crowd irrationality is the edge).\n"
+        f"  - The event is upcoming and uncertain.\n"
+        f"  - General uncertainty or mixed opinions exist.\n"
+        f"  - The market has not resolved yet.\n\n"
+        f"Do NOT fail a NO trade simply because the market price is high or because "
+        f"the outcome seems possible. Overpriced markets driven by hype are exactly "
+        f"what NO trades are designed to exploit.\n\n"
         f"Respond in this exact format:\n"
         f"VERDICT: PASS or FAIL\n"
-        f"REASON: <one or two sentences explaining your conclusion>"
+        f"REASON: <one sentence — cite the specific hard condition if FAIL, "
+        f"or confirm no hard conditions exist if PASS>"
     )
 
 
@@ -82,9 +118,32 @@ def _parse_verdict(response_text: str, market_id: str) -> FundamentalsVerdict:
         passed = verdict_match.group(1).upper() == "PASS"
         reasoning = reason_match.group(1).strip() if reason_match else text
     else:
-        # Fallback: if response contains "fail" or "red flag", treat as fail
+        # Fallback: only treat as FAIL on the two hard conditions we defined.
+        # Keywords that unambiguously signal a hard condition — we require they
+        # appear WITHOUT a preceding negation (no, not, without, lacks).
         lower = text.lower()
-        passed = not any(w in lower for w in ["fail", "red flag", "already resolved", "trap"])
+
+        def _hard_condition_present(keyword: str) -> bool:
+            """True if keyword present and not negated by nearby 'no/not/without'."""
+            idx = lower.find(keyword)
+            if idx == -1:
+                return False
+            # Look at the 40 chars before the keyword for negating words
+            prefix = lower[max(0, idx - 40): idx]
+            negations = ("no ", "not ", "without ", "lacks ", "no concrete ", "no specific ")
+            return not any(neg in prefix for neg in negations)
+
+        hard_conditions = [
+            "confirmed insider",
+            "insider information",
+            "confirmed injury",
+            "resolution ambigui",
+            "genuinely disputed",
+            "already resolved",
+            "already settled",
+            "verdict: fail",
+        ]
+        passed = not any(_hard_condition_present(kw) for kw in hard_conditions)
         reasoning = text
 
     return FundamentalsVerdict(
@@ -121,7 +180,7 @@ class FundamentalsChecker:
         """Return True if DeepSeek API key is configured."""
         return bool(self._key)
 
-    def check(self, market, ai_prob: float) -> FundamentalsVerdict:
+    def check(self, market, ai_prob: float, side: str = "YES") -> FundamentalsVerdict:
         """Run a fundamentals sanity check on a single market.
 
         Parameters
@@ -130,6 +189,10 @@ class FundamentalsChecker:
             A Market object (needs .question, .price, .market_id).
         ai_prob :
             The AI-estimated true probability (from oracle or true_prob field).
+        side : "YES" or "NO"
+            Trade direction. "NO" means we are shorting (buying the NO token);
+            the prompt instructs DeepSeek that hype-driven overpricing is the
+            opportunity, not a trap.
 
         Returns
         -------
@@ -144,12 +207,24 @@ class FundamentalsChecker:
                 market_id=market.market_id,
             )
 
-        prompt = _build_prompt(market.question, market.price, ai_prob)
+        prompt = _build_prompt(market.question, market.price, ai_prob, side=side)
+
+        from datetime import date
+        today = date.today().isoformat()   # e.g. "2026-05-13"
+        system_content = (
+            f"Today's date is {today}. "
+            "Use this date as your ground truth when evaluating whether events have "
+            "already happened, are upcoming, or whether any deadlines have passed. "
+            "Do NOT assume any other date.\n\n"
+            "You are a concise prediction-market risk analyst. "
+            "Your job is to PASS trade signals unless you can identify a specific, "
+            "concrete hard condition. When in doubt, PASS."
+        )
 
         payload = json.dumps({
             "model": self._model,
             "messages": [
-                {"role": "system", "content": "You are a concise prediction-market risk analyst."},
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.3,
@@ -191,6 +266,8 @@ class FundamentalsChecker:
         """Check a list of (opp, decision) tuples, return only those that pass.
 
         Opportunities that FAIL the fundamentals check are logged and dropped.
+        The trade direction (YES/NO) is extracted from opp.rationale so the
+        prompt can apply the correct logic for long vs short trades.
         """
         if not self.is_available():
             log.info("FundamentalsChecker: DEEPSEEK_API_KEY not set — skipping all checks")
@@ -202,15 +279,26 @@ class FundamentalsChecker:
             market = opp.market
             ai_prob = market.true_prob
 
-            verdict = self.check(market, ai_prob)
+            # Extract trade side from rationale (set by strategy layer)
+            side = "YES"
+            for note in getattr(opp, "rationale", []):
+                if "side=NO" in note or "direction=SELL" in note or "(side=NO)" in note:
+                    side = "NO"
+                    break
+                if "side=YES" in note or "direction=BUY" in note or "(side=YES)" in note:
+                    side = "YES"
+                    break
+
+            verdict = self.check(market, ai_prob, side=side)
 
             if verdict.pass_check:
                 passed.append(item)
-                log.debug("[%s] Fundamentals PASS: %s", market.market_id, verdict.reasoning)
+                log.debug("[%s] Fundamentals PASS (%s): %s",
+                          market.market_id, side, verdict.reasoning)
             else:
                 log.warning(
-                    "[%s] Fundamentals FAIL — alert blocked: %s",
-                    market.market_id, verdict.reasoning,
+                    "[%s] Fundamentals FAIL (%s) — alert blocked: %s",
+                    market.market_id, side, verdict.reasoning,
                 )
 
         log.info(
