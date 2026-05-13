@@ -19,9 +19,9 @@ from typing import Callable, List, Optional, Set
 
 from .config import AccountConfig, DEFAULT_CONFIG
 from .mock_data import load_mock_markets
-from .models import Market, RiskDecision, StableOpportunity, VolatilityOpportunity
+from .models import Market, RiskDecision, SmartMoneyReport, SmartMoneySignal, StableOpportunity, VolatilityOpportunity
 from .risk import RiskController
-from .strategies import stable_strategy, volatility_strategy
+from .strategies import smart_money_strategy, stable_strategy, volatility_strategy
 
 
 # ---------------------------------------------------------------------------
@@ -36,6 +36,9 @@ class ScanReport:
     # Rejected for transparency / debugging
     stable_rejected:     List[tuple]  = field(default_factory=list)
     volatility_rejected: List[tuple]  = field(default_factory=list)
+
+    # Smart Money — 独立观察层（不经过风险控制器）
+    smart_money: SmartMoneyReport = field(default_factory=SmartMoneyReport)
 
     # Metadata
     total_markets_scanned: int = 0
@@ -156,5 +159,12 @@ class MarketScanner:
                 report.volatility_approved.append((opp, decision))
             else:
                 report.volatility_rejected.append((opp, decision))
+
+        # --- Smart Money sleeve (observation only — bypasses risk controller) ---
+        sm_signals = smart_money_strategy(markets)
+        report.smart_money = SmartMoneyReport(
+            signals         = sm_signals,
+            markets_scanned = len(markets),
+        )
 
         return report, held_markets

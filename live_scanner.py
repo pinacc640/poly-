@@ -78,6 +78,7 @@ from polymarket_scanner.formatter import (
     format_arb_report,
     format_monitor_report,
     format_report,
+    format_smart_money_report,
 )
 from polymarket_scanner.mock_data import load_mock_markets
 from polymarket_scanner.models import Market
@@ -326,7 +327,55 @@ def _build_telegram_summary(
     else:
         lines.append("⏭ 套利扫描未启用")
 
+    lines.append("")
+
+    # ── Smart Money 汇总（仅统计，WHALE ALERT 已通过独立消息推送）────────
+    if scan_report is not None:
+        sm = scan_report.smart_money
+        n_whale = len(sm.whale_alerts)
+        n_watch = len(sm.watch_signals)
+        if n_whale > 0:
+            lines.append(
+                f"🐋 <b>Smart Money</b>：{n_whale} 条 WHALE ALERT 已单独推送  |  "
+                f"{n_watch} 条 WATCH（见主报告）"
+            )
+        elif n_watch > 0:
+            lines.append(f"👁 Smart Money：{n_watch} 条 WATCH 信号（见主报告）")
+        else:
+            lines.append("🐋 Smart Money：当前无符合纪律的巨鲸异动")
+    else:
+        lines.append("⏭ Smart Money 扫描已跳过（--no-scan）")
+
     return "\n".join(lines)
+
+
+def _build_smart_money_whale_alert(sm_report) -> str:
+    """构建 Smart Money WHALE ALERT Telegram 消息（HTML 格式）。
+
+    仅当存在 WHALE_ALERT 信号时调用。与凯利开仓条件完全解耦，
+    标注为"鲸鱼资金行为预警（非开仓信号）"。
+    """
+    import datetime as _dt
+    now = _dt.datetime.now().strftime("%m-%d %H:%M")
+    lines = [
+        f"<b>🐋 Smart Money — 鲸鱼资金行为预警  [{now}]</b>",
+        "<i>⚠️ 以下为纯观察信号，非开仓建议，不依赖 EV / Kelly 条件</i>",
+        "",
+        f"共发现 <b>{len(sm_report.whale_alerts)}</b> 条 WHALE ALERT：",
+        "",
+    ]
+    for sig in sm_report.whale_alerts[:10]:   # 最多推送 10 条
+        q = sig.market.question[:60]
+        lines += [
+            f"<b>• {q}</b>",
+            f"  Vol/Liq = <b>{sig.vol_liq_ratio:.2f}</b>  |  "
+            f"24h 价格变动 = <b>{sig.market.price_change_24h:+.2%}</b>",
+            f"  当前价格 = {sig.market.price:.3f}  |  "
+            f"流动性 = ${sig.market.liquidity:,.0f}",
+            "",
+        ]
+    return "\n".join(lines).strip()
+
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -571,11 +620,11 @@ def main() -> None:
     if using_mock:
         print("⚠️  注意：当前结果基于 mock 数据（Gamma API 不可用）\n")
 
-    # Phase 1：新机会报告
+    # Phase 1：新机会报告（含 Smart Money 观察层）
     if scan_report is not None:
         if scan_report.already_held_skipped:
             print(f"🚫 已分流 {scan_report.already_held_skipped} 个持仓市场至监控模块\n")
-        print(format_report(scan_report))
+        print(format_report(scan_report))   # Smart Money 分区已内嵌在 format_report 中
 
     # Phase 2a：持仓监控报告
     if monitor_report is not None:
@@ -587,11 +636,20 @@ def main() -> None:
         print(separator)
         print(format_arb_report(arb_report))
 
-    # 若什么都没运行
+    # 若什么都没运行（但 Smart Money 可能独立输出）
     if scan_report is None and monitor_report is None and arb_report is None:
         print("未运行任何扫描模块。请加上 --use-ai / --monitor / --arb 参数之一。")
 
-    # ── 9. Telegram 简报（无论有无机会，只要启用就发送）──────────────────
+    # ── 8b. Smart Money WHALE ALERT 独立 Telegram 预警 ───────────────────
+    # 不依赖凯利/EV 开仓条件，满足阈值即推送，与主简报解耦
+    sm_report = scan_report.smart_money if scan_report is not None else None
+    if tg_enabled and sm_report is not None and sm_report.whale_alerts:
+        logger.info("🐋 发现 %d 条 WHALE ALERT，独立推送 Telegram 预警…",
+                    len(sm_report.whale_alerts))
+        whale_text = _build_smart_money_whale_alert(sm_report)
+        _send_telegram(tg_token, tg_chat_id, whale_text, logger)
+
+    # ── 9. Telegram 主简报（无论有无机会，只要启用就发送）────────────────
     if tg_enabled:
         summary = _build_telegram_summary(
             scan_report    = scan_report,

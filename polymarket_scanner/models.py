@@ -176,6 +176,49 @@ class ArbitrageOpportunity:
         )
 
 
+# ---------------------------------------------------------------------------
+# Smart Money — 巨鲸异动观察层模型
+# ---------------------------------------------------------------------------
+@dataclass
+class SmartMoneySignal:
+    """单条 Smart Money 信号。由 smart_money_strategy() 生成。
+
+    signal_type
+    -----------
+    WHALE_ALERT : Vol/Liq >= 0.50 且 |24h price move| >= 2%
+                  高置信度巨鲸行为，触发独立 Telegram 预警
+    WATCH       : Vol/Liq >= 0.20 且 |24h price move| >= 1%
+                  值得关注，记入报告但不强制预警
+
+    注意：SmartMoneySignal 是纯观察层，不包含仓位建议，
+    不经过风险控制器，与 Stable / Volatility 执行层完全解耦。
+    """
+    market:         Market
+    signal_type:    Literal["WHALE_ALERT", "WATCH"]
+    vol_liq_ratio:  float          # volume_24h / liquidity
+    abs_price_move: float          # abs(price_change_24h)
+    rationale:      List[str] = field(default_factory=list)
+
+    @property
+    def is_whale_alert(self) -> bool:
+        return self.signal_type == "WHALE_ALERT"
+
+
+@dataclass
+class SmartMoneyReport:
+    """smart_money_strategy() 的输出容器。"""
+    signals:         List[SmartMoneySignal] = field(default_factory=list)
+    markets_scanned: int = 0
+
+    @property
+    def whale_alerts(self) -> List[SmartMoneySignal]:
+        return [s for s in self.signals if s.signal_type == "WHALE_ALERT"]
+
+    @property
+    def watch_signals(self) -> List[SmartMoneySignal]:
+        return [s for s in self.signals if s.signal_type == "WATCH"]
+
+
 @dataclass
 class ArbitrageReport:
     """ArbitrageScanner.scan() 的输出容器。"""

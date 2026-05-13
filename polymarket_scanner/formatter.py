@@ -26,8 +26,9 @@ Rejected candidates are shown as a compact audit trail at the bottom.
 from .models import StableOpportunity, VolatilityOpportunity, RiskDecision
 from .scanner import ScanReport
 
-_NO_TRADE_MSG = "当前无符合纪律的交易机会。"
-_DIVIDER = "─" * 60
+_NO_TRADE_MSG    = "当前无符合纪律的交易机会。"
+_NO_SM_MSG       = "当前无符合纪律的巨鲸异动。"
+_DIVIDER         = "─" * 60
 
 
 def _fmt_stable(opp: StableOpportunity, decision: RiskDecision) -> str:
@@ -79,6 +80,7 @@ def format_report(report: ScanReport) -> str:
     # ── Header ──────────────────────────────────────────────────────
     cfg = report.config
     capital_str = f"${cfg.total_capital:.0f}" if cfg else "N/A"
+    sm  = report.smart_money
     lines += [
         _DIVIDER,
         "  POLYMARKET MARKET SCANNER  —  SCAN REPORT",
@@ -86,7 +88,8 @@ def format_report(report: ScanReport) -> str:
         f"  Markets scanned : {report.total_markets_scanned}",
         f"  Account capital : {capital_str}",
         f"  Stable approved : {len(report.stable_approved)}   "
-        f"Vol approved : {len(report.volatility_approved)}",
+        f"Vol approved : {len(report.volatility_approved)}   "
+        f"Smart Money alerts : {len(sm.whale_alerts)}",
         _DIVIDER,
         "",
     ]
@@ -110,6 +113,11 @@ def format_report(report: ScanReport) -> str:
     else:
         lines.append(f"  {_NO_TRADE_MSG}")
         lines.append("")
+
+    # ── Smart Money (observation layer) ────────────────────────────
+    lines.append("Smart Money (观察层 — 巨鲸异动，非开仓信号):")
+    lines.append(format_smart_money_section(sm))
+    lines.append("")
 
     # ── Audit trail: rejected candidates ───────────────────────────
     rejected_total = len(report.stable_rejected) + len(report.volatility_rejected)
@@ -268,5 +276,81 @@ def format_arb_report(report: ArbitrageReport) -> str:
         lines.append("  当前无满足阈值的跨平台套利机会。")
         lines.append("")
 
+    lines.append("─" * W)
+    return "\n".join(lines)
+
+
+
+# =============================================================================
+# Smart Money — 巨鲸异动观察层格式化
+# =============================================================================
+
+from .models import SmartMoneyReport, SmartMoneySignal   # noqa: E402
+
+_SM_SIGNAL_EMOJI = {"WHALE_ALERT": "🐋", "WATCH": "👁"}
+
+
+def _fmt_smart_money_signal(sig: SmartMoneySignal) -> str:
+    emoji = _SM_SIGNAL_EMOJI.get(sig.signal_type, "•")
+    tag   = "⚡ 巨鲸预警" if sig.signal_type == "WHALE_ALERT" else "👁 观察"
+    lines = [
+        f"  {emoji} [{tag}]  {sig.market.question[:70]}",
+        f"     市场 ID    : {sig.market.market_id}",
+    ]
+    for note in sig.rationale:
+        lines.append(f"     {note}")
+    return "\n".join(lines)
+
+
+def format_smart_money_section(report: SmartMoneyReport) -> str:
+    """在 ScanReport 内嵌输出 Smart Money 分区（单行或多行）。"""
+    if not report.signals:
+        return f"  {_NO_SM_MSG}"
+
+    lines: list[str] = []
+    if report.whale_alerts:
+        lines.append(f"  🐋 WHALE ALERT（{len(report.whale_alerts)} 条）：")
+        for sig in report.whale_alerts:
+            lines.append(_fmt_smart_money_signal(sig))
+            lines.append("")
+    if report.watch_signals:
+        lines.append(f"  👁 WATCH（{len(report.watch_signals)} 条）：")
+        for sig in report.watch_signals:
+            lines.append(_fmt_smart_money_signal(sig))
+            lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def format_smart_money_report(report: SmartMoneyReport) -> str:
+    """独立输出完整 Smart Money 报告（供 live_scanner Telegram 预警使用）。"""
+    W = 60
+    lines: list[str] = [
+        "─" * W,
+        "  🐋  Smart Money — 巨鲸异动观察层",
+        "─" * W,
+        f"  扫描市场: {report.markets_scanned} 个  |  "
+        f"WHALE ALERT: {len(report.whale_alerts)} 条  |  "
+        f"WATCH: {len(report.watch_signals)} 条",
+        "",
+    ]
+
+    if not report.signals:
+        lines.append(f"  {_NO_SM_MSG}")
+    else:
+        if report.whale_alerts:
+            lines.append(f"  🐋 WHALE ALERT（共 {len(report.whale_alerts)} 条）：")
+            lines.append("")
+            for sig in report.whale_alerts:
+                lines.append(_fmt_smart_money_signal(sig))
+                lines.append("")
+        if report.watch_signals:
+            lines.append(f"  👁 WATCH（共 {len(report.watch_signals)} 条）：")
+            lines.append("")
+            for sig in report.watch_signals:
+                lines.append(_fmt_smart_money_signal(sig))
+                lines.append("")
+
+    lines.append("─" * W)
+    lines.append("  ⚠️  以上均为观察信号，非开仓建议，请结合基本面独立决策。")
     lines.append("─" * W)
     return "\n".join(lines)
