@@ -146,10 +146,20 @@ class FundamentalsChecker:
 
         prompt = _build_prompt(market.question, market.price, ai_prob)
 
+        from datetime import date
+        today = date.today().isoformat()   # e.g. "2026-05-13"
+        system_content = (
+            f"Today's date is {today}. "
+            "Use this date as your ground truth when evaluating whether events have "
+            "already happened, are upcoming, or whether any deadlines have passed. "
+            "Do NOT assume any other date.\n\n"
+            "You are a concise prediction-market risk analyst."
+        )
+
         payload = json.dumps({
             "model": self._model,
             "messages": [
-                {"role": "system", "content": "You are a concise prediction-market risk analyst."},
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.3,
