@@ -27,14 +27,18 @@ class ScanReport:
     # Approved opportunities (passed risk controller)
     stable_approved:     List[tuple]  = field(default_factory=list)   # (StableOpportunity, RiskDecision)
     volatility_approved: List[tuple]  = field(default_factory=list)   # (VolatilityOpportunity, RiskDecision)
+    smart_money_approved: List[tuple] = field(default_factory=list)   # (SmartMoneyOpportunity, RiskDecision)
+    arbitrage_found:     List[tuple]  = field(default_factory=list)   # (ArbitrageOpportunity, RiskDecision)
 
     # Rejected for transparency / debugging
     stable_rejected:     List[tuple]  = field(default_factory=list)
     volatility_rejected: List[tuple]  = field(default_factory=list)
+    smart_money_rejected: List[tuple] = field(default_factory=list)
 
     # Metadata
     total_markets_scanned: int = 0
     config: Optional[AccountConfig] = None
+    ai_oracle_used: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -71,9 +75,13 @@ class MarketScanner:
     # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
-    def run(self) -> ScanReport:
+    def run(self, use_ai: bool = False, run_arbitrage: bool = False) -> ScanReport:
         markets = self.fetch_markets()
-        report  = ScanReport(total_markets_scanned=len(markets), config=self.cfg)
+        report  = ScanReport(
+            total_markets_scanned=len(markets),
+            config=self.cfg,
+            ai_oracle_used=use_ai,
+        )
 
         rc = RiskController(self.cfg)   # shared controller tracks vol sleeve usage
 
@@ -94,5 +102,30 @@ class MarketScanner:
                 report.volatility_approved.append((opp, decision))
             else:
                 report.volatility_rejected.append((opp, decision))
+
+        # --- Smart Money sleeve ---
+        try:
+            from polymarket_scanner.strategies.smart_money import smart_money_strategy
+            smart_candidates = smart_money_strategy(markets, self.cfg)
+            for opp in smart_candidates:
+                decision = rc.approve(opp)
+                if decision.approved:
+                    report.smart_money_approved.append((opp, decision))
+                else:
+                    report.smart_money_rejected.append((opp, decision))
+        except ImportError:
+            pass
+
+        # --- Arbitrage sleeve ---
+        if run_arbitrage:
+            try:
+                from polymarket_scanner.strategies.arbitrage import arbitrage_strategy
+                arb_candidates = arbitrage_strategy(markets, self.cfg)
+                for opp in arb_candidates:
+                    decision = rc.approve(opp)
+                    if decision.approved:
+                        report.arbitrage_found.append((opp, decision))
+            except ImportError:
+                pass
 
         return report

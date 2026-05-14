@@ -18,6 +18,8 @@ class Market:
     question: str
     category: str                    # e.g. "politics", "sports", "crypto", "oil"
     price: float                     # current YES price, 0..1
+    bid: float = 0.0                 # best bid price
+    ask: float = 1.0                 # best ask price
     liquidity: float                 # USD depth
     volume_24h: float                # USD volume in last 24h
     volume_prev_24h: float           # USD volume 24-48h ago (for trend detection)
@@ -26,6 +28,11 @@ class Market:
     true_prob: float                 # analyst / model estimate of fair prob
     has_political_shock: bool = False         # sudden headline risk
     has_fundamental_change: bool = False      # disqualifies vol arbitrage
+
+    @property
+    def spread(self) -> float:
+        """Bid-ask spread."""
+        return self.ask - self.bid
 
     @property
     def volume_increasing(self) -> bool:
@@ -50,7 +57,26 @@ class StableOpportunity:
     suggested_position: float        # USD
     expected_profit: float           # USD
     risk_level: Literal["Low", "Medium", "High"]
+    side: str = "YES"                # YES or NO
+    kelly_bet: float = 0.0           # Kelly bet amount
+    take_profit_price: float = 0.0   # TP price
     rationale: List[str] = field(default_factory=list)
+
+    @property
+    def market_id(self) -> str:
+        return self.market.market_id
+
+    @property
+    def question(self) -> str:
+        return self.market.question
+
+    @property
+    def true_prob(self) -> float:
+        return self.market.true_prob
+
+    @property
+    def entry_price(self) -> float:
+        return self.market.price
 
 
 @dataclass
@@ -63,7 +89,18 @@ class VolatilityOpportunity:
     suggested_position: float        # USD
     expected_profit: float           # USD at target
     max_hold_days: int
+    side: str = "YES"                # YES or NO
+    kelly_bet: float = 0.0           # Kelly bet amount
+    take_profit_price: float = 0.0   # TP price
     rationale: List[str] = field(default_factory=list)
+
+    @property
+    def market_id(self) -> str:
+        return self.market.market_id
+
+    @property
+    def question(self) -> str:
+        return self.market.question
 
 
 # ---------------------------------------------------------------------------
@@ -74,3 +111,64 @@ class RiskDecision:
     approved: bool
     reasons: List[str] = field(default_factory=list)   # why rejected (if any)
     approved_position: Optional[float] = None          # possibly downsized
+
+
+# ---------------------------------------------------------------------------
+# Additional strategy outputs
+# ---------------------------------------------------------------------------
+@dataclass
+class SmartMoneyOpportunity:
+    market: Market
+    flow_direction: str              # "BUY" or "SELL"
+    vol_liq_ratio: float             # volume / liquidity ratio
+    price_impact: float              # price change magnitude
+    confidence: str                  # "LOW", "MEDIUM", "HIGH"
+    ev: float
+    suggested_position: float        # USD
+    expected_profit: float           # USD
+    side: str = "YES"                # YES or NO
+    kelly_bet: float = 0.0           # Kelly bet amount
+    take_profit_price: float = 0.0   # TP price
+    rationale: List[str] = field(default_factory=list)
+
+    @property
+    def market_id(self) -> str:
+        return self.market.market_id
+
+    @property
+    def question(self) -> str:
+        return self.market.question
+
+    @property
+    def true_prob(self) -> float:
+        return self.market.true_prob
+
+    @property
+    def entry_price(self) -> float:
+        return self.market.price
+
+
+@dataclass
+class ArbitrageOpportunity:
+    poly_market: Market
+    kalshi_data: dict                # raw kalshi market data
+    poly_side: str                   # "YES" or "NO"
+    poly_price: float
+    kalshi_price: float
+    spread: float                    # profit potential
+    confidence: str                  # "LOW", "MEDIUM", "HIGH"
+    suggested_position: float        # USD
+    expected_profit: float           # USD
+    rationale: List[str] = field(default_factory=list)
+
+    @property
+    def market_id(self) -> str:
+        return self.poly_market.market_id
+
+    @property
+    def question(self) -> str:
+        return self.poly_market.question
+
+    @property
+    def true_prob(self) -> float:
+        return self.poly_market.true_prob
