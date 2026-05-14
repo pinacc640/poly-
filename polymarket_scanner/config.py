@@ -1,6 +1,7 @@
 """Default configuration for scanner strategies and risk management."""
 
 from dataclasses import dataclass
+from typing import Tuple
 
 
 @dataclass
@@ -13,7 +14,7 @@ class AccountConfig:
     kelly_cap: float = 0.20  # cap at 20% of capital
 
     # Profit target
-    min_absolute_profit: float = 0.10  # $0.10 minimum (放宽)
+    min_absolute_profit: float = 0.10  # $0.10 minimum
     tp_capture_ratio: float = 0.80  # capture 80% of AI edge as TP
 
     # Execution
@@ -25,23 +26,25 @@ class AccountConfig:
 
     # ---- Stable (80% sleeve) ----
     stable_min_liquidity: float = 100_000.0  # $100k
-    stable_max_days_to_expiry: int = 30  # 放宽到 30 天
-    stable_min_score: int = 3  # 放宽到 3 分
-    stable_price_high: float = 0.75  # 扩大到 0.75
-    stable_price_low: float = 0.25  # 扩大到 0.25
+    stable_max_days_to_expiry: int = 30
+    stable_min_score: int = 3
+    stable_price_high: float = 0.75
+    stable_price_low: float = 0.25
+    
+    # 宏观风险黑名单
+    macro_blocklist: Tuple[str, ...] = ("oil", "gold", "war", "geopolitics")
 
     # ---- Volatility (20% sleeve) ----
     vol_min_liquidity: float = 100_000.0
-    vol_min_abs_price_change_24h: float = 0.03  # 放宽到 3%
+    vol_min_abs_price_change_24h: float = 0.03
 
     # ---- Smart Money ----
     sm_min_volume: float = 100_000.0
-    sm_min_vol_ratio: float = 2.0  # volume must 2x previous 24h
-    sm_min_price_move: float = 0.02  # 2% price move
+    sm_min_vol_ratio: float = 2.0
+    sm_min_price_move: float = 0.02
 
     # ---- Arbitrage ----
-    arb_min_spread: float = 0.02  # 2% minimum spread
+    arb_min_spread: float = 0.02
 
 
-# Global default for use when caller does not provide config
 DEFAULT_CONFIG = AccountConfig()
