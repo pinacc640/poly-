@@ -159,6 +159,9 @@ def _duckduckgo_search(
         # Extract snippets from <a class="result__snippet" ...>...</a>
         snippets = re.findall(r'class="result__snippet"[^>]*>(.+?)</a>', html_body, re.DOTALL)
 
+        if not titles and html_body:
+            logger.warning("DuckDuckGo HTML parsed 0 results — markup may have changed")
+
         results = []
         for i in range(min(len(titles), max_results)):
             title = re.sub(r'<[^>]+>', '', titles[i])
@@ -262,7 +265,7 @@ def _parse_probability(text: str) -> Optional[float]:
 # ---------------------------------------------------------------------------
 # Prompt builder
 # ---------------------------------------------------------------------------
-def _build_messages(market: Market, news_context: str) -> List[dict]:
+def _build_messages(market: Market, news_context: str, source_label: str = "Brave Search") -> List[dict]:
     system_prompt = (
         "You are a probability calibration expert for prediction markets. "
         "Your task is to estimate the true probability of a binary market outcome "
@@ -277,7 +280,7 @@ Current market price (implied probability): {market.price:.2%}
 Category: {market.category}
 Days to expiry: {market.days_to_expiry}
 
-Latest News Context (from Brave Search):
+Latest News Context (from {source_label}):
 {news_context}
 
 Based on the news context above, what is your best estimate of the TRUE probability
@@ -356,14 +359,19 @@ class AIOracle:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-    def _get_news_context(self, query: str) -> str:
-        """Fetch news via Brave; fall back to DuckDuckGo on quota exceeded or empty results."""
+    def _get_news_context(self, query: str) -> tuple:
+        """Fetch news via Brave; fall back to DuckDuckGo on quota exceeded or empty results.
+
+        Returns a tuple of (source_label, context_text) where source_label is
+        "Brave Search" or "DuckDuckGo".
+        """
         if not self._brave_enabled:
             # No Brave key - try DuckDuckGo directly
             results = _duckduckgo_search(query, max_results=self._max_results, timeout=self._timeout)
+            time.sleep(1.5)
             if results:
-                return _format_news_context(results)
-            return "(Live search disabled — BRAVE_API_KEY not configured.)"
+                return ("DuckDuckGo", _format_news_context(results))
+            return ("DuckDuckGo", "(Live search disabled — BRAVE_API_KEY not configured.)")
 
         try:
             results = _brave_search(
@@ -374,17 +382,20 @@ class AIOracle:
         except BraveQuotaExceeded:
             logger.warning("Brave API 配额耗尽，切换到 DuckDuckGo 备用搜索")
             results = _duckduckgo_search(query, max_results=self._max_results, timeout=self._timeout)
-            return _format_news_context(results)
+            time.sleep(1.5)
+            return ("DuckDuckGo", _format_news_context(results))
 
         if not results:
             logger.warning("Brave Search returned no results for query: %r, trying DuckDuckGo", query)
             results = _duckduckgo_search(query, max_results=self._max_results, timeout=self._timeout)
+            time.sleep(1.5)
+            return ("DuckDuckGo", _format_news_context(results))
 
-        return _format_news_context(results)
+        return ("Brave Search", _format_news_context(results))
 
-    def _estimate_prob(self, market: Market, news_context: str) -> float:
+    def _estimate_prob(self, market: Market, news_context: str, source_label: str = "Brave Search") -> float:
         """Call DeepSeek and parse the probability; raises on failure."""
-        messages = _build_messages(market, news_context)
+        messages = _build_messages(market, news_context, source_label=source_label)
         response_text = _deepseek_chat(
             messages, self.deepseek_key,
             model=self._model,
@@ -411,8 +422,8 @@ class AIOracle:
         market (with its existing true_prob) is returned unchanged.
         """
         try:
-            news_context = self._get_news_context(market.question)
-            new_prob     = self._estimate_prob(market, news_context)
+            source_label, news_context = self._get_news_context(market.question)
+            new_prob = self._estimate_prob(market, news_context, source_label=source_label)
 
             logger.info(
                 "[%s] true_prob updated: %.4f → %.4f  (search: %s)",
