@@ -14,18 +14,20 @@ from typing import List, Literal, Optional
 # ---------------------------------------------------------------------------
 @dataclass
 class Market:
+    # 必填字段（无默认值）必须在有默认值字段前面
     market_id: str
     question: str
     category: str                    # e.g. "politics", "sports", "crypto", "oil"
     price: float                     # current YES price, 0..1
-    bid: float = 0.0                 # best bid price
-    ask: float = 1.0                 # best ask price
     liquidity: float                 # USD depth
     volume_24h: float                # USD volume in last 24h
     volume_prev_24h: float           # USD volume 24-48h ago (for trend detection)
     price_change_24h: float          # signed delta in YES price over last 24h
     days_to_expiry: int
     true_prob: float                 # analyst / model estimate of fair prob
+    # 有默认值字段放后面
+    bid: float = 0.0                 # best bid price
+    ask: float = 1.0                 # best ask price
     has_political_shock: bool = False         # sudden headline risk
     has_fundamental_change: bool = False      # disqualifies vol arbitrage
 
