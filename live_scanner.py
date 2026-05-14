@@ -143,15 +143,15 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Polymarket live scanner — stable + vol + smart-money + arbitrage",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--limit", type=int, default=1000, metavar="N",
+    p.add_argument("--limit", type=int, default=2000, metavar="N",
                    help="Max markets to fetch from Gamma API")
     p.add_argument("--capital", type=float, default=50.0, metavar="USD",
                    help="Total account capital in USD")
     p.add_argument("--max-position", type=float, default=0.10, metavar="RATIO",
                    help="Max single position as fraction of capital")
-    p.add_argument("--min-profit", type=float, default=0.10, metavar="USD",
+    p.add_argument("--min-profit", type=float, default=0.05, metavar="USD",
                    help="Minimum expected profit per trade in USD")
-    p.add_argument("--min-liquidity", type=float, default=100_000.0, metavar="USD",
+    p.add_argument("--min-liquidity", type=float, default=50_000.0, metavar="USD",
                    help="Minimum market liquidity in USD")
     p.add_argument("--max-days", type=int, default=14, metavar="DAYS",
                    help="Max days to expiry for stable strategy")
@@ -343,7 +343,7 @@ def main() -> None:
             from polymarket_scanner.ai_oracle import AIOracle
             print("🔮 AI Oracle 模式 — 正在用 DeepSeek + Brave Search 评估概率…\n")
             
-            ai_threshold = 100_000
+            ai_threshold = 50_000
             ai_markets = [m for m in markets if m.liquidity >= ai_threshold]
             skip_markets = [m for m in markets if m.liquidity < ai_threshold]
             

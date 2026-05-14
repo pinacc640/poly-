@@ -65,7 +65,7 @@ class GammaClient:
     def fetch_active_markets(self, limit: int = 500) -> List[dict]:
         all_markets: List[dict] = []
         offset = 0
-        batch_size = min(limit, 500)
+        batch_size = 500
 
         while len(all_markets) < limit:
             params = {

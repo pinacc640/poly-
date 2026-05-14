@@ -21,9 +21,11 @@ Usage
     enriched_markets = oracle.enrich_all(markets)
 """
 
+import html as _html
 import json
 import logging
 import os
+import re
 import time
 from typing import List, Optional
 
@@ -44,6 +46,14 @@ BRAVE_SEARCH_URL  = "https://api.search.brave.com/res/v1/web/search"
 BRAVE_MAX_RESULTS = 5
 REQUEST_TIMEOUT   = 15   # seconds per HTTP call
 RETRY_ATTEMPTS    = 2
+
+
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+class BraveQuotaExceeded(Exception):
+    """Raised when Brave Search API returns HTTP 402 (quota exhausted)."""
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +108,8 @@ def _brave_search(
             return results
 
         except urllib.error.HTTPError as exc:
+            if exc.code == 402:
+                raise BraveQuotaExceeded(f"Brave API quota exceeded (HTTP 402)")
             logger.warning("Brave Search HTTP %s on attempt %d: %s", exc.code, attempt, exc.reason)
         except urllib.error.URLError as exc:
             logger.warning("Brave Search URL error on attempt %d: %s", attempt, exc.reason)
@@ -108,6 +120,61 @@ def _brave_search(
             time.sleep(1)
 
     return []
+
+
+# ---------------------------------------------------------------------------
+# DuckDuckGo HTML fallback search
+# ---------------------------------------------------------------------------
+def _duckduckgo_search(
+    query: str,
+    max_results: int = BRAVE_MAX_RESULTS,
+    timeout: int = REQUEST_TIMEOUT,
+) -> List[dict]:
+    """Fallback search via DuckDuckGo HTML interface.
+
+    Returns list of dicts with 'title' and 'description' keys (same format
+    as _brave_search).  Returns empty list on any error.
+    """
+    try:
+        form_data = urllib.parse.urlencode({"q": query}).encode("utf-8")
+        req = urllib.request.Request(
+            "https://html.duckduckgo.com/html/",
+            data=form_data,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            method="POST",
+        )
+
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            html_body = resp.read().decode("utf-8", errors="replace")
+
+        # Extract titles from <a class="result__a" ...>...</a>
+        titles = re.findall(r'class="result__a"[^>]*>(.+?)</a>', html_body, re.DOTALL)
+        # Extract snippets from <a class="result__snippet" ...>...</a>
+        snippets = re.findall(r'class="result__snippet"[^>]*>(.+?)</a>', html_body, re.DOTALL)
+
+        results = []
+        for i in range(min(len(titles), max_results)):
+            title = re.sub(r'<[^>]+>', '', titles[i])
+            title = _html.unescape(title).strip()
+            desc = ""
+            if i < len(snippets):
+                desc = re.sub(r'<[^>]+>', '', snippets[i])
+                desc = _html.unescape(desc).strip()
+            results.append({"title": title, "description": desc})
+
+        logger.debug("DuckDuckGo search returned %d results for query: %r", len(results), query)
+        return results
+
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.debug("DuckDuckGo search failed: %s", exc)
+        return []
 
 
 def _format_news_context(results: List[dict]) -> str:
@@ -290,16 +357,29 @@ class AIOracle:
     # Internal helpers
     # ------------------------------------------------------------------
     def _get_news_context(self, query: str) -> str:
-        """Fetch news via Brave; return formatted context string."""
+        """Fetch news via Brave; fall back to DuckDuckGo on quota exceeded or empty results."""
         if not self._brave_enabled:
+            # No Brave key - try DuckDuckGo directly
+            results = _duckduckgo_search(query, max_results=self._max_results, timeout=self._timeout)
+            if results:
+                return _format_news_context(results)
             return "(Live search disabled — BRAVE_API_KEY not configured.)"
-        results = _brave_search(
-            query, self.brave_key,
-            max_results=self._max_results,
-            timeout=self._timeout,
-        )
+
+        try:
+            results = _brave_search(
+                query, self.brave_key,
+                max_results=self._max_results,
+                timeout=self._timeout,
+            )
+        except BraveQuotaExceeded:
+            logger.warning("Brave API 配额耗尽，切换到 DuckDuckGo 备用搜索")
+            results = _duckduckgo_search(query, max_results=self._max_results, timeout=self._timeout)
+            return _format_news_context(results)
+
         if not results:
-            logger.warning("Brave Search returned no results for query: %r", query)
+            logger.warning("Brave Search returned no results for query: %r, trying DuckDuckGo", query)
+            results = _duckduckgo_search(query, max_results=self._max_results, timeout=self._timeout)
+
         return _format_news_context(results)
 
     def _estimate_prob(self, market: Market, news_context: str) -> float:
