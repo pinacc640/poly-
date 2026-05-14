@@ -1,8 +1,4 @@
-"""Gamma API 客户端 — 从 Polymarket Gamma API 拉取市场数据。
-
-Gamma API 是 Polymarket 的公开市场数据接口，无需认证。
-文档：https://gamma-api.polymarket.com
-"""
+"""Gamma API 客户端 — 从 Polymarket Gamma API 拉取市场数据。"""
 
 import json
 import logging
@@ -24,32 +20,39 @@ class GammaClient:
     def __init__(self, base_url: str = GAMMA_BASE_URL, timeout: int = DEFAULT_TIMEOUT):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-        # 宽松 SSL 上下文（解决 Python 3.13 证书验证问题）
         self._ssl_ctx = ssl.create_default_context()
         self._ssl_ctx.check_hostname = False
         self._ssl_ctx.verify_mode = ssl.CERT_NONE
 
-    def _request(self, endpoint: str, params: Optional[dict] = None) -> Optional[object]:
+    def _request(self, endpoint: str, params: Optional[dict] = None, retry: int = 3) -> Optional[object]:
         url = f"{self.base_url}{endpoint}"
         if params:
             url = f"{url}?{urllib.parse.urlencode(params)}"
 
-        req = urllib.request.Request(
-            url,
-            headers={
-                "Accept": "application/json",
-                "User-Agent": "polymarket-scanner/2.0",
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout, context=self._ssl_ctx) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            log.warning("Gamma API HTTP %d: %s (%s)", e.code, e.reason, endpoint)
-        except urllib.error.URLError as e:
-            log.warning("Gamma API 连接失败: %s (%s)", e.reason, endpoint)
-        except Exception as e:
-            log.warning("Gamma API 错误: %s (%s)", e, endpoint)
+        headers = {
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.9",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Origin": "https://polymarket.com",
+            "Referer": "https://polymarket.com/",
+        }
+
+        for attempt in range(retry):
+            req = urllib.request.Request(url, headers=headers)
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout, context=self._ssl_ctx) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    log.debug("Gamma API success: %s", endpoint)
+                    return data
+            except urllib.error.HTTPError as e:
+                if e.code == 403 and attempt < retry - 1:
+                    log.warning("Gamma API 403, 重试 %d/%d", attempt + 1, retry)
+                    continue
+                log.warning("Gamma API HTTP %d: %s (%s)", e.code, e.reason, endpoint)
+            except urllib.error.URLError as e:
+                log.warning("Gamma API 连接失败: %s (%s)", e.reason, endpoint)
+            except Exception as e:
+                log.warning("Gamma API 错误: %s (%s)", e, endpoint)
         return None
 
     def health_check(self) -> bool:
@@ -100,13 +103,12 @@ class GammaClient:
         params_str = urllib.parse.urlencode(params_list)
         url = f"{self.base_url}/markets?{params_str}"
         
-        req = urllib.request.Request(
-            url,
-            headers={
-                "Accept": "application/json",
-                "User-Agent": "polymarket-scanner/2.0",
-            },
-        )
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        }
+        req = urllib.request.Request(url, headers=headers)
+        
         try:
             with urllib.request.urlopen(req, timeout=self.timeout, context=self._ssl_ctx) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
