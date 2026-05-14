@@ -180,6 +180,82 @@ def _duckduckgo_search(
         return []
 
 
+# ---------------------------------------------------------------------------
+# Google HTML fallback search
+# ---------------------------------------------------------------------------
+def _google_search(
+    query: str,
+    max_results: int = BRAVE_MAX_RESULTS,
+    timeout: int = REQUEST_TIMEOUT,
+) -> List[dict]:
+    """Fallback search via Google HTML scraping.
+
+    Scrapes Google search results page for titles (<h3> tags) and
+    descriptions from nearby text. Returns list of dicts with 'title'
+    and 'description' keys (same format as _brave_search).
+    Returns empty list on any error.
+    """
+    try:
+        params = urllib.parse.urlencode({"q": query, "num": max_results, "hl": "en"})
+        url = f"https://www.google.com/search?{params}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+        )
+
+        import ssl as _ssl
+        ctx = _ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE
+
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            html_body = resp.read().decode("utf-8", errors="replace")
+
+        # Extract titles from <h3> tags
+        h3_matches = re.findall(r'<h3[^>]*>(.*?)</h3>', html_body, re.DOTALL)
+
+        # Extract descriptions: text in <span> elements near results
+        # Google wraps descriptions in spans within result divs
+        desc_matches = re.findall(
+            r'<div[^>]*class="[^"]*VwiC3b[^"]*"[^>]*>(.*?)</div>',
+            html_body, re.DOTALL
+        )
+        # Fallback: try data-sncf pattern used in some Google layouts
+        if not desc_matches:
+            desc_matches = re.findall(
+                r'<span[^>]*class="[^"]*st[^"]*"[^>]*>(.*?)</span>',
+                html_body, re.DOTALL
+            )
+
+        if not h3_matches and html_body:
+            logger.warning("Google HTML parsed 0 results - markup may have changed or request was blocked")
+
+        results = []
+        for i in range(min(len(h3_matches), max_results)):
+            title = re.sub(r'<[^>]+>', '', h3_matches[i])
+            title = _html.unescape(title).strip()
+            desc = ""
+            if i < len(desc_matches):
+                desc = re.sub(r'<[^>]+>', '', desc_matches[i])
+                desc = _html.unescape(desc).strip()
+            results.append({"title": title, "description": desc})
+
+        logger.debug("Google search returned %d results for query: %r", len(results), query)
+        return results
+
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.debug("Google search failed: %s", exc)
+        return []
+
+
 def _format_news_context(results: List[dict]) -> str:
     """Render search results as a numbered news-context block."""
     if not results:
@@ -321,6 +397,8 @@ class AIOracle:
         Maximum tokens in the DeepSeek response (default: 256).
     """
 
+    _brave_exhausted: bool = False
+
     def __init__(
         self,
         deepseek_api_key:  Optional[str] = None,
@@ -360,18 +438,23 @@ class AIOracle:
     # Internal helpers
     # ------------------------------------------------------------------
     def _get_news_context(self, query: str) -> tuple:
-        """Fetch news via Brave; fall back to DuckDuckGo on quota exceeded or empty results.
+        """Fetch news via Brave; fall back to Google/DuckDuckGo on quota exceeded or empty results.
 
         Returns a tuple of (source_label, context_text) where source_label is
-        "Brave Search" or "DuckDuckGo".
+        "Brave Search", "Google" or "DuckDuckGo".
         """
-        if not self._brave_enabled:
-            # No Brave key - try DuckDuckGo directly
+        if not self._brave_enabled or self._brave_exhausted:
+            # No Brave key or quota exhausted - try Google then DuckDuckGo
+            results = _google_search(query, max_results=self._max_results, timeout=self._timeout)
+            if results:
+                time.sleep(1.5)
+                return ("Google", _format_news_context(results))
+            # Google failed, try DuckDuckGo as secondary
             results = _duckduckgo_search(query, max_results=self._max_results, timeout=self._timeout)
             time.sleep(1.5)
             if results:
                 return ("DuckDuckGo", _format_news_context(results))
-            return ("DuckDuckGo", "(Live search disabled — BRAVE_API_KEY not configured.)")
+            return ("Google", "(Live search disabled - no search results available.)")
 
         try:
             results = _brave_search(
@@ -380,13 +463,22 @@ class AIOracle:
                 timeout=self._timeout,
             )
         except BraveQuotaExceeded:
-            logger.warning("Brave API 配额耗尽，切换到 DuckDuckGo 备用搜索")
+            AIOracle._brave_exhausted = True
+            logger.warning("Brave API 配额耗尽，本次会话将使用备用搜索引擎")
+            results = _google_search(query, max_results=self._max_results, timeout=self._timeout)
+            if results:
+                time.sleep(1.5)
+                return ("Google", _format_news_context(results))
             results = _duckduckgo_search(query, max_results=self._max_results, timeout=self._timeout)
             time.sleep(1.5)
             return ("DuckDuckGo", _format_news_context(results))
 
         if not results:
-            logger.warning("Brave Search returned no results for query: %r, trying DuckDuckGo", query)
+            logger.warning("Brave Search returned no results for query: %r, trying Google", query)
+            results = _google_search(query, max_results=self._max_results, timeout=self._timeout)
+            if results:
+                time.sleep(1.5)
+                return ("Google", _format_news_context(results))
             results = _duckduckgo_search(query, max_results=self._max_results, timeout=self._timeout)
             time.sleep(1.5)
             return ("DuckDuckGo", _format_news_context(results))

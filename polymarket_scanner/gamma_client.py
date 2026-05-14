@@ -2,6 +2,7 @@
 
 import json
 import logging
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -66,6 +67,7 @@ class GammaClient:
         all_markets: List[dict] = []
         offset = 0
         batch_size = min(limit, 500)
+        max_batch_retries = 2
 
         while len(all_markets) < limit:
             params = {
@@ -74,7 +76,17 @@ class GammaClient:
                 "limit": batch_size,
                 "offset": offset,
             }
-            data = self._request("/markets", params)
+
+            data = None
+            for retry in range(max_batch_retries + 1):
+                data = self._request("/markets", params)
+                if data and isinstance(data, list):
+                    break
+                if retry < max_batch_retries:
+                    log.warning("Gamma batch offset=%d 失败，重试 %d/%d ...", offset, retry + 1, max_batch_retries)
+                    time.sleep(2)
+                else:
+                    log.warning("Gamma batch offset=%d 重试耗尽，跳过", offset)
 
             if not data or not isinstance(data, list):
                 break
@@ -85,6 +97,7 @@ class GammaClient:
                 break
 
             offset += batch_size
+            time.sleep(1)  # 避免触发速率限制
 
         log.info("Fetched %d active markets from Gamma API.", len(all_markets))
         return all_markets[:limit]

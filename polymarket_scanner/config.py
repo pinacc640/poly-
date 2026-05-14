@@ -27,7 +27,7 @@ class AccountConfig:
     # ---- Stable (80% sleeve) ----
     stable_min_liquidity: float = 50_000.0  # $50k
     stable_max_days_to_expiry: int = 60
-    stable_min_score: int = 3
+    stable_min_score: int = 2
     stable_price_high: float = 0.70
     stable_price_low: float = 0.30
     
