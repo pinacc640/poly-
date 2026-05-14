@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""live_scanner.py — 生产级 CLI 入口，支持真实 Gamma API + 自动降级 mock + AI Oracle RAG。
+"""live_scanner.py — 生产级 CLI 入口，支持真实 Gamma API + CLOB 账户持仓 + AI Oracle RAG。
 
 用法示例
 --------
-# 基础模式（自动尝试 Gamma API，失败则降级 mock 数据）：
+# ★ 扫描我的真实账户持仓（每次都实时拉取，无缓存）：
+    python live_scanner.py --positions --capital 70
+
+# 基础模式（扫描全市场，自动尝试 Gamma API，失败则降级 mock 数据）：
     python live_scanner.py --capital 70
+
+# 持仓模式 + AI Oracle（对你持有的每个仓位用 AI 重新评估概率）：
+    python live_scanner.py --positions --use-ai --capital 70
 
 # 完整 AI Oracle 模式（DeepSeek + Brave 联网搜索）：
     set DEEPSEEK_API_KEY=sk-...
@@ -15,15 +21,16 @@
     python live_scanner.py --mock --capital 70
 
 # 调试模式（打印原始 API 响应 + 详细日志）：
-    python live_scanner.py --use-ai --capital 70 --verbose
+    python live_scanner.py --positions --capital 70 --verbose
 
 CLI 参数一览
 -----------
+--positions           ★ 只扫描你的真实账户持仓（实时 CLOB API，每次均最新）
 --capital FLOAT       账户总资金，单位 USD（默认 50）
 --use-ai              启用 AI Oracle（需要 DEEPSEEK_API_KEY 环境变量）
 --mock                强制使用 mock 数据，跳过 Gamma API
 --limit INT           从 Gamma API 最多拉取多少个市场（默认 200）
---min-liquidity FLOAT 市场最低流动性过滤（默认 50000 USD）
+--min-liquidity FLOAT 市场最低流动性过滤（默认 50000 USD，--positions 模式下忽略）
 --timeout INT         Gamma API / AI API 请求超时秒数（默认 15）
 --model STR           DeepSeek 模型名（默认 deepseek-chat）
 --max-results INT     Brave Search 每个市场返回条数（默认 5）
@@ -49,6 +56,7 @@ from polymarket_scanner.config import AccountConfig
 from polymarket_scanner.formatter import format_report
 from polymarket_scanner.mock_data import load_mock_markets
 from polymarket_scanner.models import Market
+from polymarket_scanner.positions import fetch_positions, AuthError, PositionFetchError
 from polymarket_scanner.scanner import MarketScanner
 
 # ---------------------------------------------------------------------------
@@ -185,6 +193,8 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Polymarket Market Scanner — 真实数据 + AI Oracle 版",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    p.add_argument("--positions",     action="store_true", default=False,
+                   help="★ 只扫描你的真实账户持仓（实时 CLOB API，需配置 POLY_API_KEY 等环境变量）")
     p.add_argument("--capital",       type=float, default=50.0,   metavar="USD",
                    help="账户总资金 USD（默认 50）")
     p.add_argument("--use-ai",        action="store_true", default=False,
@@ -236,7 +246,27 @@ def main() -> None:
     # ── 2. 获取市场数据 ───────────────────────────────────────────────────────
     using_mock = False
 
-    if args.mock:
+    # ── 2a. 持仓模式：实时拉取你的 CLOB 账户仓位 ────────────────────────────
+    if args.positions:
+        logger.info("📌 --positions 模式：实时拉取 CLOB 账户持仓…")
+        try:
+            markets = fetch_positions(timeout=args.timeout, logger=logger)
+        except AuthError as e:
+            print(f"\n[认证错误] {e}\n")
+            sys.exit(1)
+        except PositionFetchError as e:
+            print(f"\n[API 错误] {e}\n")
+            sys.exit(1)
+
+        if not markets:
+            print("ℹ️  当前账户无持仓，无需扫描。")
+            sys.exit(0)
+
+        src_label = f"✅ CLOB 实时持仓（{len(markets)} 个仓位）"
+        logger.info(src_label)
+
+    # ── 2b. 全市场模式：Gamma API 或降级 mock ───────────────────────────────
+    elif args.mock:
         logger.info("--mock 模式：直接使用 mock 数据")
         markets    = load_mock_markets()
         using_mock = True
@@ -252,7 +282,10 @@ def main() -> None:
             markets    = load_mock_markets()
             using_mock = True
 
-    src_label = "⚠️  mock 数据" if using_mock else "✅ Gamma API 实时数据"
+    src_label = "⚠️  mock 数据" if using_mock else (
+        f"✅ CLOB 实时持仓（{len(markets)} 个仓位）" if args.positions
+        else "✅ Gamma API 实时数据"
+    )
     logger.info("数据来源：%s，共 %d 个市场", src_label, len(markets))
 
     # ── 3. AI Oracle 增强（可选）─────────────────────────────────────────────
