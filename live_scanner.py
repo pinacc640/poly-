@@ -225,12 +225,9 @@ def main() -> None:
     )
 
     # ── Phase 4: on-chain portfolio sync ────────────────────────────────────
-    # Syncs wallet positions to portfolio.json BEFORE the scan so we can
-    # split markets into "fresh" (no position) vs "held" (already in).
     portfolio = {}
     held_market_ids = set()
     
-    # 只有在非 positions 模式下才做持仓同步
     if not args.positions:
         try:
             from polymarket_scanner.portfolio_sync import sync_portfolio, load_portfolio
@@ -255,7 +252,6 @@ def main() -> None:
     # --- AI Oracle pre-check ---
     if args.use_ai:
         import os
-        # Support both DEEPSEEK_API_KEY (preferred) and legacy SILICONFLOW_API_KEY
         if not os.getenv("DEEPSEEK_API_KEY") and not os.getenv("SILICONFLOW_API_KEY"):
             log.error(
                 "--use-ai requires DEEPSEEK_API_KEY (or SILICONFLOW_API_KEY) "
@@ -281,7 +277,6 @@ def main() -> None:
 
     # --- 数据源选择 ---
     if args.positions:
-        # 持仓模式：只扫描你的持仓
         try:
             from polymarket_scanner.positions import fetch_positions, AuthError, PositionFetchError
             log.info("📌 --positions 模式：实时拉取 CLOB 账户持仓…")
@@ -300,10 +295,9 @@ def main() -> None:
 
             log.info("✅ CLOB 实时持仓：%d 个仓位", len(markets))
         except ImportError:
-            log.error("positions module not available. Use --positions without positions.py")
+            log.error("positions module not available.")
             sys.exit(1)
     else:
-        # 全市场模式
         data_source = LiveDataSource(
             client=client,
             limit=args.limit,
@@ -349,13 +343,11 @@ def main() -> None:
             from polymarket_scanner.ai_oracle import AIOracle
             print("🔮 AI Oracle 模式 — 正在用 DeepSeek + Brave Search 评估概率…\n")
             
-            # 智能过滤：只对高流动性市场调用 AI
-            # 流动性 >= $100K 的市场才用 AI，其他跳过
             ai_threshold = 100_000
             ai_markets = [m for m in markets if m.liquidity >= ai_threshold]
             skip_markets = [m for m in markets if m.liquidity < ai_threshold]
             
-            log.info("AI 前置过滤：%d 个市场符合条件（流动性>=%s）且价格区间/波动），%d 个跳过 AI 直接用原始概率",
+            log.info("AI 前置过滤：%d 个市场符合条件（流动性>=%s），%d 个跳过 AI 直接用原始概率",
                      len(ai_markets), f"${ai_threshold:,}", len(skip_markets))
             
             if ai_markets:
@@ -363,7 +355,6 @@ def main() -> None:
                 ai_markets = oracle.enrich_all(ai_markets)
                 log.info("AI Oracle 增强完成（实际调用 %d 次，节省 %d 次）", len(ai_markets), len(skip_markets))
             
-            # 合并
             markets = ai_markets + skip_markets
         except ImportError:
             log.warning("ai_oracle not available, skipping AI enhancement")
@@ -372,10 +363,8 @@ def main() -> None:
     scanner = MarketScanner(
         cfg           = cfg,
         data_source   = lambda: markets,
-        use_ai        = use_ai,
-        run_arbitrage = args.arbitrage,
     )
-    report: ScanReport = scanner.run()
+    report: ScanReport = scanner.run(use_ai=use_ai, run_arbitrage=args.arbitrage)
 
     print(format_report(report))
 
@@ -388,7 +377,7 @@ def main() -> None:
     if total_approved == 0:
         log.info("No approved opportunities found this scan.")
 
-    # ── Telegram push (with dedup + fundamentals check) ─────────────────────
+    # ── Telegram push ─────────────────────
     try:
         from polymarket_scanner.notifier import TelegramNotifier
         from polymarket_scanner.dedup import PushDedup
@@ -396,7 +385,6 @@ def main() -> None:
 
         notifier = TelegramNotifier()
         if notifier.is_enabled():
-            # Collect all approved opportunities
             all_approved = (
                 report.stable_approved
                 + report.volatility_approved
@@ -404,14 +392,12 @@ def main() -> None:
             )
 
             if all_approved:
-                # Step A: Dedup — filter out markets already pushed in the last 24h
                 dedup = PushDedup()
                 new_opps = dedup.filter_new(all_approved)
                 log.info("📋 Dedup: %d total → %d new (skipped %d already pushed)",
                          len(all_approved), len(new_opps), len(all_approved) - len(new_opps))
 
                 if new_opps:
-                    # Step B: Fundamentals check — DeepSeek sanity filter on new opps
                     checker = FundamentalsChecker()
                     if checker.is_available():
                         verified_opps = checker.check_opportunities(new_opps)
@@ -419,11 +405,8 @@ def main() -> None:
                                  len(verified_opps), len(new_opps))
                     else:
                         verified_opps = new_opps
-                        log.debug("Fundamentals check skipped (DEEPSEEK_API_KEY not set)")
 
-                    # Step C: Send Telegram alerts for verified opportunities
                     if verified_opps:
-                        # Rebuild a mini-report with only the verified opps for the notifier
                         push_report = ScanReport(
                             stable_approved=[x for x in verified_opps if x in report.stable_approved],
                             volatility_approved=[x for x in verified_opps if x in report.volatility_approved],
@@ -434,24 +417,16 @@ def main() -> None:
                         )
                         sent = notifier.send_report(push_report)
                         log.info("📱 Telegram: sent %d message(s)", sent)
-
-                        # Step D: Mark pushed so next run won't re-alert
                         dedup.mark_pushed(verified_opps)
-                    else:
-                        log.info("📱 Telegram: all new opps failed fundamentals check, no push")
-                else:
-                    log.info("📱 Telegram: all opportunities already pushed within 24h, skipping")
-            else:
-                log.info("📱 Telegram: no approved trade opportunities, skipping push")
     except ImportError as e:
         log.debug("Telegram modules not available: %s", e)
 
-    # ── Phase 4: position risk monitor ───────────────────────────────────────
+    # ── Position risk monitor ───────────────────────────────────────
     if portfolio and not args.positions:
         try:
             from polymarket_scanner.position_monitor import PositionMonitor
             monitor    = PositionMonitor()
-            pos_alerts = monitor.check(portfolio, markets)   # use ALL markets for price lookup
+            pos_alerts = monitor.check(portfolio, markets)
 
             if pos_alerts:
                 log.info("📊 Position monitor: %d alert(s) triggered", len(pos_alerts))
@@ -463,13 +438,12 @@ def main() -> None:
                     else:
                         raise ImportError("notifier not enabled")
                 except ImportError:
-                    # No Telegram configured — print to terminal
                     import re
                     print("\n" + "═" * 65)
                     print("  📊 POSITION RISK ALERTS")
                     print("═" * 65)
                     for msg in pos_alerts:
-                        print(re.sub(r"<[^>]+>", "", msg))   # strip HTML tags
+                        print(re.sub(r"<[^>]+>", "", msg))
                         print()
             else:
                 log.info("📊 Position monitor: all %d position(s) within normal range", len(portfolio))
