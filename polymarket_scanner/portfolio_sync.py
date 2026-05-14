@@ -288,6 +288,18 @@ def sync_portfolio(
 
     log.info("Data API returned %d position(s)", len(raw_list))
 
+    # 按 conditionId 去重，每个市场只保留 size 最大的记录
+    seen = {}
+    for raw in raw_list:
+        cid = str(raw.get("conditionId") or raw.get("market") or "").strip()
+        if not cid:
+            continue
+        existing = seen.get(cid)
+        if existing is None or float(raw.get("size") or 0) > float(existing.get("size") or 0):
+            seen[cid] = raw
+    raw_list = list(seen.values())
+    log.info("After dedup: %d unique position(s)", len(raw_list))
+
     # 批量查 Gamma 补充数据
     condition_ids = [str(p.get("conditionId") or "").strip() for p in raw_list if p.get("conditionId")]
     gamma_map = _fetch_gamma_market_info(condition_ids)

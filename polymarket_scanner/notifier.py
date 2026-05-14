@@ -46,6 +46,25 @@ class TelegramNotifier:
                 "TelegramNotifier: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — "
                 "notifications disabled."
             )
+        else:
+            # 打印 token 前10位方便调试（确认读到了正确的值）
+            log.debug("TelegramNotifier: token=%s... chat_id=%s",
+                      self.bot_token[:10], self.chat_id)
+            # 验证 token 是否有效
+            try:
+                test_url = f"{TELEGRAM_API_BASE}/bot{self.bot_token}/getMe"
+                req = urllib.request.Request(test_url)
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    result = json.loads(resp.read().decode("utf-8"))
+                    if not result.get("ok"):
+                        log.warning("Telegram Bot Token 无效（getMe 返回 false）— 推送已禁用。请重新生成 token。")
+                        self._enabled = False
+            except urllib.error.HTTPError as e:
+                if e.code == 401:
+                    log.warning("Telegram Bot Token 已失效（401 Unauthorized）— 推送已禁用。请到 @BotFather 重新生成 token。")
+                    self._enabled = False
+            except Exception:
+                pass  # 网络问题不影响其他功能
 
     def is_enabled(self) -> bool:
         """检查是否已配置 Telegram。"""

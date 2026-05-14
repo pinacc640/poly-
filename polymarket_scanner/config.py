@@ -19,15 +19,15 @@ class AccountConfig:
     volatility_cap_ratio: float = 0.20       # total volatility sleeve <= 20%
 
     # --- Minimum profitability gates ---
-    min_absolute_profit: float = 0.50        # USD
+    min_absolute_profit: float = 0.10        # USD
     min_profit_ratio: float = 0.01           # 1% of total capital
 
     # --- Stable strategy filters ---
-    stable_max_days_to_expiry: int = 14
-    stable_price_high: float = 0.80
-    stable_price_low: float = 0.20
+    stable_max_days_to_expiry: int = 30
+    stable_price_high: float = 0.75
+    stable_price_low: float = 0.25
     stable_min_liquidity: float = 100_000.0
-    stable_min_score: int = 5
+    stable_min_score: int = 3
 
     # Categories that the stable strategy refuses to touch because
     # they carry macro/headline tail risk disproportionate to a
@@ -40,7 +40,7 @@ class AccountConfig:
     )
 
     # --- Volatility strategy filters ---
-    vol_min_abs_price_change_24h: float = 0.05
+    vol_min_abs_price_change_24h: float = 0.03
     vol_min_liquidity: float = 100_000.0
     vol_target_move: float = 0.05            # +5% take profit
     vol_stop_move: float = 0.05              # -5% stop loss
