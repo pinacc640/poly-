@@ -46,11 +46,43 @@ import argparse
 import datetime
 import json
 import logging
+import os
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import List, Optional
+
+
+# ---------------------------------------------------------------------------
+# .env 加载（不依赖 python-dotenv，在任何 import 之前执行）
+# ---------------------------------------------------------------------------
+def _load_dotenv_early() -> None:
+    """在程序最开始加载 .env 文件，确保所有环境变量可用。"""
+    candidates = [
+        os.path.join(os.getcwd(), ".env"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        k, _, v = line.partition("=")
+                        k = k.strip()
+                        v = v.strip().strip('"').strip("'")
+                        if k and k not in os.environ:
+                            os.environ[k] = v
+            except Exception:
+                pass
+            break
+
+# 立即执行，确保后续 import 的模块能读到环境变量
+_load_dotenv_early()
+
 
 from polymarket_scanner.config import AccountConfig
 from polymarket_scanner.formatter import format_report
