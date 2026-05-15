@@ -25,22 +25,22 @@ class AccountConfig:
     max_positions: int = 15  # max concurrent positions
 
     # ---- Stable (80% sleeve) ----
-    stable_min_liquidity: float = 50_000.0  # $50k
+    stable_min_liquidity: float = 10_000.0  # $10k
     stable_max_days_to_expiry: int = 60
-    stable_min_score: int = 2
-    stable_price_high: float = 0.70
-    stable_price_low: float = 0.30
+    stable_min_score: int = 1
+    stable_price_high: float = 0.60
+    stable_price_low: float = 0.40
     
     # 宏观风险黑名单
     macro_blocklist: Tuple[str, ...] = ("oil", "gold", "war", "geopolitics")
 
     # ---- Volatility (20% sleeve) ----
-    vol_min_liquidity: float = 50_000.0
-    vol_min_abs_price_change_24h: float = 0.02
+    vol_min_liquidity: float = 10_000.0
+    vol_min_abs_price_change_24h: float = 0.01
 
     # ---- Smart Money ----
-    sm_min_volume: float = 100_000.0
-    sm_min_vol_ratio: float = 2.0
+    sm_min_volume: float = 20_000.0
+    sm_min_vol_ratio: float = 1.5
     sm_min_price_move: float = 0.02
 
     # ---- Arbitrage ----

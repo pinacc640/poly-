@@ -37,8 +37,8 @@ def smart_money_strategy(
     opportunities = []
     
     # 阈值
-    min_volume = max(100_000, cfg.stable_min_liquidity * 0.3)
-    min_vol_ratio = 0.3
+    min_volume = max(20_000, cfg.stable_min_liquidity * 0.3)
+    min_vol_ratio = 0.2
     min_price_move = 0.02  # 2%
     min_expected_profit = cfg.min_absolute_profit
     
