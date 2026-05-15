@@ -151,7 +151,7 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Max single position as fraction of capital")
     p.add_argument("--min-profit", type=float, default=0.05, metavar="USD",
                    help="Minimum expected profit per trade in USD")
-    p.add_argument("--min-liquidity", type=float, default=50_000.0, metavar="USD",
+    p.add_argument("--min-liquidity", type=float, default=10_000.0, metavar="USD",
                    help="Minimum market liquidity in USD")
     p.add_argument("--max-days", type=int, default=14, metavar="DAYS",
                    help="Max days to expiry for stable strategy")
@@ -343,7 +343,7 @@ def main() -> None:
             from polymarket_scanner.ai_oracle import AIOracle
             print("🔮 AI Oracle 模式 — 正在用 DeepSeek + Brave Search 评估概率…\n")
             
-            ai_threshold = 50_000
+            ai_threshold = 10_000
             ai_markets = [m for m in markets if m.liquidity >= ai_threshold]
             skip_markets = [m for m in markets if m.liquidity < ai_threshold]
             

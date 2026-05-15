@@ -33,7 +33,7 @@ def find_arbitrage_opportunities(
     """
     opportunities = []
     min_spread = 0.02
-    min_liquidity = 50_000
+    min_liquidity = 10_000
     
     # 建立 Polymarket 市场索引
     poly_index = {}
